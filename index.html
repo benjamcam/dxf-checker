@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Part Reuse Prototype</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Fabricated Part Reuse</p>
+        <h1>Duplicate and Standardization Review</h1>
+      </div>
+      <div class="header-stats" id="headerStats"></div>
+    </header>
+
+    <main class="shell">
+      <section class="toolbar" aria-label="Search and filters">
+        <div class="search-box">
+          <label for="query">Search existing parts</label>
+          <input id="query" type="search" placeholder="Try: 5x5 gusset, GST, 2x2 plate, tube">
+        </div>
+        <div class="filter-grid">
+          <label>
+            Family
+            <select id="familyFilter">
+              <option value="">All</option>
+            </select>
+          </label>
+          <label>
+            Material
+            <select id="materialFilter">
+              <option value="">All</option>
+            </select>
+          </label>
+          <label>
+            Thickness
+            <select id="thicknessFilter">
+              <option value="">All</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <nav class="tabs" aria-label="Views">
+        <button class="tab is-active" data-view="engineer">Engineer Search</button>
+        <button class="tab" data-view="dxf">DXF Comparison</button>
+        <button class="tab" data-view="review">CI/Admin Review</button>
+        <button class="tab" data-view="rules">Rules</button>
+      </nav>
+
+      <section id="engineerView" class="view is-active">
+        <div class="section-heading">
+          <h2>Existing Part Options</h2>
+          <p>Fast visual results first; open the model when verification is needed.</p>
+        </div>
+        <div id="partResults" class="part-grid"></div>
+      </section>
+
+      <section id="dxfView" class="view">
+        <div class="section-heading">
+          <h2>DXF Profile Comparison</h2>
+          <p>Drop a folder of DXFs to group matching flat cut profiles.</p>
+        </div>
+        <div class="dxf-layout">
+          <section class="drop-zone" id="dxfDropZone">
+            <input id="dxfFolderInput" type="file" accept=".dxf" webkitdirectory directory multiple>
+            <div>
+              <h3>Drop DXF Folder</h3>
+              <p>Compares line, polyline, circle, and arc geometry while ignoring text, dimensions, layers, entity order, origin, rotation, and mirroring.</p>
+            </div>
+            <div class="drop-actions">
+              <button class="primary" id="chooseDxfFolder" type="button">Choose folder</button>
+              <button id="loadSampleDxfSet" type="button">Load sample set</button>
+            </div>
+          </section>
+          <aside class="dxf-summary" id="dxfSummary">
+            <div class="stat"><strong>0</strong><span>DXFs</span></div>
+            <div class="stat"><strong>0</strong><span>Profile Groups</span></div>
+            <div class="stat"><strong>0</strong><span>Exact Matches</span></div>
+          </aside>
+        </div>
+        <div id="dxfResults" class="dxf-results">
+          <div class="empty">No DXFs loaded yet.</div>
+        </div>
+      </section>
+
+      <section id="reviewView" class="view">
+        <div class="section-heading">
+          <h2>Review Queue</h2>
+          <p>Clusters ranked by confidence and operational impact.</p>
+        </div>
+        <div id="clusterResults" class="cluster-list"></div>
+      </section>
+
+      <section id="rulesView" class="view">
+        <div class="section-heading">
+          <h2>Matching Rules</h2>
+          <p>Transparent enough for engineering to trust and tune.</p>
+        </div>
+        <div class="rules-grid">
+          <article>
+            <h3>Exact Duplicate</h3>
+            <p>Same normalized family, material, thickness, bounding box, hole signature, and very close weight.</p>
+          </article>
+          <article>
+            <h3>Standardization Opportunity</h3>
+            <p>Same or very similar geometry but different thicknesses, materials, or small dimensional variants.</p>
+          </article>
+          <article>
+            <h3>Tube/Profile Candidate</h3>
+            <p>Same normalized profile, material, and length. Flagged lower confidence because holes and angled cuts may be missing from metadata.</p>
+          </article>
+          <article>
+            <h3>Learning Signals</h3>
+            <p>Engineer/admin decisions suppress false positives and promote preferred standard parts in future rankings.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <template id="partCardTemplate">
+      <article class="part-card">
+        <div class="preview" aria-hidden="true"></div>
+        <div class="part-main">
+          <div class="part-title-row">
+            <h3></h3>
+            <span class="badge"></span>
+          </div>
+          <p class="description"></p>
+          <dl class="metrics"></dl>
+          <div class="actions">
+            <button class="primary">Use this part</button>
+            <button>Open model</button>
+            <button>Not interchangeable</button>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <template id="clusterTemplate">
+      <article class="cluster-card">
+        <div class="cluster-head">
+          <div>
+            <p class="cluster-type"></p>
+            <h3></h3>
+          </div>
+          <span class="confidence"></span>
+        </div>
+        <p class="cluster-reason"></p>
+        <div class="cluster-parts"></div>
+        <div class="actions">
+          <button class="primary">Mark preferred standard</button>
+          <button>Approve variants</button>
+          <button>False positive</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="app.js?v=20260627i"></script>
+  </body>
+</html>
