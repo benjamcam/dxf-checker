@@ -5,3 +5,7 @@ build/
 .env
 .env.local
 *.log
+
+# Local/customer DXF test data
+DXF Test Folder.zip
+DXF Test Folder/

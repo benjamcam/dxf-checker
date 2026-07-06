@@ -81,6 +81,16 @@
             <div class="stat"><strong>0</strong><span>Exact Matches</span></div>
           </aside>
         </div>
+        <section class="dxf-lookup" aria-label="Closest DXF search">
+          <label for="dxfLookupInput">Find closest parts</label>
+          <div class="dxf-lookup-row">
+            <input id="dxfLookupInput" type="search" list="dxfLookupOptions" placeholder="Type a loaded DXF filename or part number">
+            <datalist id="dxfLookupOptions"></datalist>
+          </div>
+          <div id="dxfLookupResults" class="dxf-lookup-results">
+            <div class="empty compact">Load DXFs, then search a part to see its 5 closest candidates.</div>
+          </div>
+        </section>
         <div id="dxfResults" class="dxf-results">
           <div class="empty">No DXFs loaded yet.</div>
         </div>
@@ -158,6 +168,6 @@
       </article>
     </template>
 
-    <script src="app.js?v=20260627i"></script>
+    <script src="app.js?v=20260706a"></script>
   </body>
 </html>

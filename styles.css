@@ -398,13 +398,79 @@ input[type="file"] {
 
 .dxf-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(92px, 1fr));
+  grid-template-columns: repeat(6, minmax(92px, 1fr));
   gap: 8px;
 }
 
 .dxf-summary .stat {
   min-width: 112px;
   background: var(--surface);
+}
+
+.dxf-lookup {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.dxf-lookup label {
+  font-weight: 700;
+}
+
+.dxf-lookup-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 420px);
+}
+
+.dxf-lookup input {
+  width: 100%;
+}
+
+.dxf-lookup-card {
+  display: grid;
+  gap: 10px;
+}
+
+.dxf-lookup-card h3 {
+  margin: 2px 0;
+  font-size: 17px;
+}
+
+.dxf-lookup-card span,
+.dxf-match-list small {
+  color: var(--muted);
+}
+
+.dxf-match-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dxf-match-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfc;
+}
+
+.dxf-match-list div {
+  display: grid;
+  gap: 3px;
+}
+
+.dxf-match-list b {
+  white-space: nowrap;
+  color: var(--accent);
 }
 
 .dxf-results {
@@ -443,6 +509,11 @@ input[type="file"] {
 .dxf-group.hole-variant {
   border-color: #9db6dc;
   background: #f8fbff;
+}
+
+.dxf-group.review-candidate {
+  border-color: #d7cc8a;
+  background: #fffef5;
 }
 
 .dxf-group-preview {
@@ -497,6 +568,10 @@ input[type="file"] {
   background: var(--surface);
 }
 
+.dxf-file-list.comparison-list {
+  margin-top: 8px;
+}
+
 .dxf-warning {
   margin-top: 10px;
   color: var(--accent-2);
@@ -510,6 +585,11 @@ input[type="file"] {
   color: var(--muted);
   text-align: center;
   background: var(--surface);
+}
+
+.empty.compact {
+  padding: 14px;
+  text-align: left;
 }
 
 @media (max-width: 860px) {

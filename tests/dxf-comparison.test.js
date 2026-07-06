@@ -470,6 +470,82 @@ const tests = [
     },
   },
   {
+    name: "unique dimensional variants are surfaced as review candidates",
+    run() {
+      const files = [
+        makeFile("6x12 plate", rectangle(6, 12)),
+        makeFile("6x13 plate", rectangle(6, 13)),
+        makeFile("unrelated long plate", rectangle(2, 20)),
+      ];
+      const exact = groupDxfFiles(files);
+      const near = findDxfNearMatches(files);
+      const holes = findDxfHoleVariants(files);
+      const review = findDxfReviewCandidates(files, exact, near, holes);
+      const reviewNames = review.flatMap((group) => group.files.map((file) => file.name));
+      assert(review.length === 1, `expected 1 review group, found ${review.length}`);
+      assert(reviewNames.includes("6x12 plate") && reviewNames.includes("6x13 plate"), "similar plates missing from review group");
+      assert(!reviewNames.includes("unrelated long plate"), "unrelated plate incorrectly included in review group");
+    },
+  },
+  {
+    name: "review candidates are not listed as unique parts",
+    run() {
+      const files = [
+        makeFile("6x12 plate", rectangle(6, 12)),
+        makeFile("6x13 plate", rectangle(6, 13)),
+        makeFile("unrelated long plate", rectangle(2, 20)),
+      ];
+      const exact = groupDxfFiles(files);
+      const near = findDxfNearMatches(files);
+      const holes = findDxfHoleVariants(files);
+      const review = findDxfReviewCandidates(files, exact, near, holes);
+      const unique = findDxfUniqueFiles(files, exact, near, holes, review);
+      const uniqueNames = unique.map((file) => file.name);
+      assert(unique.length === 1, `expected 1 truly unique file, found ${unique.length}`);
+      assert(uniqueNames.includes("unrelated long plate"), "unrelated plate missing from unique list");
+      assert(!uniqueNames.includes("6x12 plate") && !uniqueNames.includes("6x13 plate"), "review candidates incorrectly listed as unique");
+    },
+  },
+  {
+    name: "closest lookup returns five ranked candidates",
+    run() {
+      const files = [
+        makeFile("target 6x12 plate", rectangle(6, 12)),
+        makeFile("exact copy", rectangle(6, 12)),
+        makeFile("close 6x13 plate", rectangle(6, 13)),
+        makeFile("close 6x14 plate", rectangle(6, 14)),
+        makeFile("same shape larger", rectangle(9, 18)),
+        makeFile("square plate", square(6)),
+        makeFile("long narrow plate", rectangle(2, 20)),
+      ];
+      const target = findDxfFileByQuery(files, "target");
+      const closest = findDxfClosestFiles(target, files, 5);
+      assert(closest.length === 5, `expected 5 closest files, found ${closest.length}`);
+      assert(closest[0].file.name === "exact copy", `expected exact copy first, found ${closest[0].file.name}`);
+      assert(closest[0].score === 100, `expected exact copy score 100, found ${closest[0].score}`);
+      assert(closest.every((match, index) => index === 0 || closest[index - 1].score >= match.score), "closest matches were not score-sorted");
+    },
+  },
+  {
+    name: "closest lookup uses hole size and spacing details",
+    run() {
+      const twoHolePlate = (secondHoleX, secondHoleRadius = 0.25) => dxf(`${lwPolyline([[0, 0], [4, 0], [4, 4], [0, 4]])}${circle(1, 1, 0.25)}${circle(secondHoleX, 1, secondHoleRadius)}`);
+      const files = [
+        makeFile("target 4x4 two-hole", twoHolePlate(3)),
+        makeFile("same holes", twoHolePlate(3)),
+        makeFile("moved hole", twoHolePlate(3.25)),
+        makeFile("resized hole", twoHolePlate(3, 0.3125)),
+      ];
+      const target = findDxfFileByQuery(files, "target");
+      const closest = findDxfClosestFiles(target, files, 3);
+      const moved = closest.find((match) => match.file.name === "moved hole");
+      const resized = closest.find((match) => match.file.name === "resized hole");
+      assert(closest[0].file.name === "same holes", `expected same holes first, found ${closest[0].file.name}`);
+      assert(moved.reasons.join(" ").includes("center") || moved.reasons.join(" ").includes("spacing"), "moved hole result did not explain location/spacing difference");
+      assert(resized.reasons.join(" ").includes("diameter"), "resized hole result did not explain diameter difference");
+    },
+  },
+  {
     name: "unsupported spline is recorded as ignored risk",
     run() {
       const parsed = parseDxf(triangleWithSpline(2));

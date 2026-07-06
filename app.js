@@ -181,8 +181,10 @@ const dxfState = {
   groups: [],
   nearMatches: [],
   holeVariants: [],
+  reviewCandidates: [],
   uniqueFiles: [],
   errors: [],
+  lookupQuery: "",
 };
 const state = {
   view: "engineer",
@@ -710,8 +712,10 @@ async function handleDxfFiles(fileList) {
   dxfState.groups = [];
   dxfState.nearMatches = [];
   dxfState.holeVariants = [];
+  dxfState.reviewCandidates = [];
   dxfState.uniqueFiles = [];
   dxfState.errors = [];
+  dxfState.lookupQuery = "";
   renderDxfResults(true);
 
   const parsed = await Promise.all(
@@ -742,7 +746,8 @@ async function handleDxfFiles(fileList) {
   dxfState.groups = groupDxfFiles(dxfState.files);
   dxfState.nearMatches = findDxfNearMatches(dxfState.files);
   dxfState.holeVariants = findDxfHoleVariants(dxfState.files);
-  dxfState.uniqueFiles = findDxfUniqueFiles(dxfState.files, dxfState.groups, dxfState.nearMatches, dxfState.holeVariants);
+  dxfState.reviewCandidates = findDxfReviewCandidates(dxfState.files, dxfState.groups, dxfState.nearMatches, dxfState.holeVariants);
+  dxfState.uniqueFiles = findDxfUniqueFiles(dxfState.files, dxfState.groups, dxfState.nearMatches, dxfState.holeVariants, dxfState.reviewCandidates);
   renderDxfResults(false);
 }
 
@@ -926,6 +931,7 @@ function buildDxfFeatureSignatures(primitives) {
       holeSignature: holes.map(primitiveSignature).sort().join(";"),
       holeCenterSignature: holes.map((hole) => pointSignature(hole.center)).sort().join(";"),
       holeRadiiSignature: holes.map((hole) => dxfRound(hole.radius)).sort().join(";"),
+      holes: holes.map((hole) => ({ center: hole.center, radius: hole.radius })).sort(compareDxfHoles),
       holeCount: holes.length,
     };
   });
@@ -1118,6 +1124,10 @@ function pointSignature(point) {
   return `${dxfRound(point.x)},${dxfRound(point.y)}`;
 }
 
+function compareDxfHoles(a, b) {
+  return a.center.x - b.center.x || a.center.y - b.center.y || a.radius - b.radius;
+}
+
 function dxfRound(value) {
   return Number(value).toFixed(4).replace(/\.?0+$/, "");
 }
@@ -1221,12 +1231,301 @@ function findDxfHoleVariants(files) {
     .sort((a, b) => b.confidence - a.confidence || b.files.length - a.files.length);
 }
 
-function findDxfUniqueFiles(files, exactGroups, nearMatches, holeVariants) {
+function findDxfReviewCandidates(files, exactGroups, nearMatches, holeVariants) {
+  const uniqueFiles = findDxfUniqueFiles(files, exactGroups, nearMatches, holeVariants);
+  const links = [];
+
+  for (let leftIndex = 0; leftIndex < uniqueFiles.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < uniqueFiles.length; rightIndex += 1) {
+      const comparison = compareDxfReviewCandidate(uniqueFiles[leftIndex], uniqueFiles[rightIndex]);
+      if (comparison.confidence >= 52 && hasDxfReviewCue(comparison)) links.push(comparison);
+    }
+  }
+
+  const linkedFiles = new Set(links.flatMap((link) => [link.a, link.b]));
+  const groups = [];
+  const seen = new Set();
+
+  linkedFiles.forEach((file) => {
+    if (seen.has(file)) return;
+    const queue = [file];
+    const groupFiles = [];
+    seen.add(file);
+
+    while (queue.length) {
+      const current = queue.shift();
+      groupFiles.push(current);
+      links.forEach((link) => {
+        const next = link.a === current ? link.b : link.b === current ? link.a : null;
+        if (next && !seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      });
+    }
+
+    const groupLinks = links.filter((link) => groupFiles.includes(link.a) && groupFiles.includes(link.b));
+    const reasons = unique(groupLinks.flatMap((link) => link.reasons));
+    const confidence = Math.round(groupLinks.reduce((best, link) => Math.max(best, link.confidence), 0));
+    groups.push({
+      files: groupFiles.sort((a, b) => profileSize(a) - profileSize(b) || a.path.localeCompare(b.path)),
+      confidence,
+      reasons,
+      comparisons: groupLinks.sort((a, b) => b.confidence - a.confidence).slice(0, 4),
+    });
+  });
+
+  return groups.sort((a, b) => b.confidence - a.confidence || b.files.length - a.files.length);
+}
+
+function compareDxfReviewCandidate(a, b) {
+  const aDimensions = sortedDxfDimensions(a.geometry.bounds);
+  const bDimensions = sortedDxfDimensions(b.geometry.bounds);
+  const widthDelta = relativeDelta(aDimensions.width, bDimensions.width);
+  const heightDelta = relativeDelta(aDimensions.height, bDimensions.height);
+  const aspectDelta = relativeDelta(aDimensions.aspect, bDimensions.aspect);
+  const areaDelta = relativeDelta(aDimensions.area, bDimensions.area);
+  const entityDelta = relativeDelta(a.geometry.entityCount, b.geometry.entityCount);
+  const reasons = [];
+  let confidence = 42;
+
+  if (widthDelta <= 0.03) {
+    confidence += 18;
+    reasons.push("matching short-side dimension");
+  } else if (widthDelta <= 0.08) {
+    confidence += 11;
+    reasons.push("close short-side dimension");
+  }
+
+  if (heightDelta <= 0.05) {
+    confidence += 18;
+    reasons.push("matching long-side dimension");
+  } else if (heightDelta <= 0.18) {
+    confidence += 11;
+    reasons.push("close long-side dimension");
+  }
+
+  if (aspectDelta <= 0.06) {
+    confidence += 12;
+    reasons.push("similar aspect ratio");
+  } else if (aspectDelta <= 0.14) {
+    confidence += 7;
+    reasons.push("related aspect ratio");
+  }
+
+  if (a.features.holeCount === b.features.holeCount) {
+    confidence += 6;
+    reasons.push("same hole count");
+  } else {
+    confidence -= 6;
+  }
+
+  if (a.geometry.entityCount === b.geometry.entityCount) {
+    confidence += 6;
+    reasons.push("same entity count");
+  } else if (entityDelta <= 0.25) {
+    confidence += 3;
+    reasons.push("similar entity count");
+  } else {
+    confidence -= 8;
+  }
+
+  if (areaDelta > 0.4) confidence -= 10;
+  if (Math.max(widthDelta, heightDelta) > 0.28 && aspectDelta > 0.12) confidence -= 18;
+  if (riskyIgnoredEntities(a).length || riskyIgnoredEntities(b).length) confidence -= 10;
+
+  return {
+    a,
+    b,
+    confidence: Math.max(0, Math.min(86, confidence)),
+    reasons,
+    deltas: { widthDelta, heightDelta, aspectDelta, areaDelta },
+  };
+}
+
+function compareDxfHolePattern(a, b) {
+  const aHoles = a.features.holes || [];
+  const bHoles = b.features.holes || [];
+  const countDelta = Math.abs(aHoles.length - bHoles.length);
+  const comparableCount = Math.min(aHoles.length, bHoles.length);
+  const reasons = [];
+  let score = 42;
+
+  if (!aHoles.length && !bHoles.length) {
+    return { score: 78, reasons: ["both have no holes"], differences: ["No hole pattern differences."] };
+  }
+  if (!comparableCount) {
+    return {
+      score: 18,
+      reasons: [`${aHoles.length} holes vs ${bHoles.length} holes`],
+      differences: [`Hole count differs: ${aHoles.length} vs ${bHoles.length}.`],
+    };
+  }
+
+  if (countDelta === 0) {
+    score += 16;
+    reasons.push(`same hole count (${aHoles.length})`);
+  } else {
+    score -= Math.min(24, countDelta * 8);
+    reasons.push(`hole count differs by ${countDelta}`);
+  }
+
+  const aRadii = aHoles.map((hole) => hole.radius).sort((left, right) => left - right);
+  const bRadii = bHoles.map((hole) => hole.radius).sort((left, right) => left - right);
+  const radiusDeltas = [];
+  for (let index = 0; index < comparableCount; index += 1) {
+    radiusDeltas.push(Math.abs(aRadii[index] - bRadii[index]));
+  }
+  const maxRadiusDelta = Math.max(...radiusDeltas);
+  const maxDiameterDelta = maxRadiusDelta * 2;
+  if (maxDiameterDelta <= 0.005) {
+    score += 16;
+    reasons.push("hole diameters match");
+  } else if (maxDiameterDelta <= 0.0625) {
+    score += 8;
+    reasons.push(`hole diameters within ${formatInches(maxDiameterDelta)}`);
+  } else {
+    score -= 8;
+    reasons.push(`hole diameters differ up to ${formatInches(maxDiameterDelta)}`);
+  }
+
+  const centerDeltas = [];
+  for (let index = 0; index < comparableCount; index += 1) {
+    const deltaX = Math.abs(aHoles[index].center.x - bHoles[index].center.x);
+    const deltaY = Math.abs(aHoles[index].center.y - bHoles[index].center.y);
+    centerDeltas.push(Math.hypot(deltaX, deltaY));
+  }
+  const maxCenterDelta = Math.max(...centerDeltas);
+  if (maxCenterDelta <= 0.01) {
+    score += 16;
+    reasons.push("hole centers match");
+  } else if (maxCenterDelta <= 0.125) {
+    score += 8;
+    reasons.push(`hole centers within ${formatInches(maxCenterDelta)}`);
+  } else {
+    score -= 8;
+    reasons.push(`hole centers shift up to ${formatInches(maxCenterDelta)}`);
+  }
+
+  const aSpacing = holeSpacingDistances(aHoles);
+  const bSpacing = holeSpacingDistances(bHoles);
+  const spacingCount = Math.min(aSpacing.length, bSpacing.length);
+  let maxSpacingDelta = null;
+  if (spacingCount) {
+    const spacingDeltas = [];
+    for (let index = 0; index < spacingCount; index += 1) {
+      spacingDeltas.push(Math.abs(aSpacing[index] - bSpacing[index]));
+    }
+    maxSpacingDelta = Math.max(...spacingDeltas);
+    if (maxSpacingDelta <= 0.01) {
+      score += 14;
+      reasons.push("hole spacing matches");
+    } else if (maxSpacingDelta <= 0.125) {
+      score += 7;
+      reasons.push(`hole spacing within ${formatInches(maxSpacingDelta)}`);
+    } else {
+      score -= 6;
+      reasons.push(`hole spacing differs up to ${formatInches(maxSpacingDelta)}`);
+    }
+  }
+
+  const differences = [`Hole count: ${aHoles.length} vs ${bHoles.length}.`];
+  differences.push(maxDiameterDelta <= 0.005 ? "Hole diameters match." : `Max hole diameter difference: ${formatInches(maxDiameterDelta)}.`);
+  differences.push(maxCenterDelta <= 0.01 ? "Hole centers match." : `Max hole center shift: ${formatInches(maxCenterDelta)}.`);
+  if (maxSpacingDelta !== null) {
+    differences.push(maxSpacingDelta <= 0.01 ? "Hole spacing matches." : `Max hole spacing difference: ${formatInches(maxSpacingDelta)}.`);
+  }
+
+  return {
+    score: Math.max(0, Math.min(100, score)),
+    reasons,
+    differences,
+    maxDiameterDelta,
+    maxCenterDelta,
+    maxSpacingDelta,
+  };
+}
+
+function holeSpacingDistances(holes) {
+  const distances = [];
+  for (let leftIndex = 0; leftIndex < holes.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < holes.length; rightIndex += 1) {
+      distances.push(Math.hypot(holes[leftIndex].center.x - holes[rightIndex].center.x, holes[leftIndex].center.y - holes[rightIndex].center.y));
+    }
+  }
+  return distances.sort((a, b) => a - b);
+}
+
+function formatInches(value) {
+  return `${dxfRound(value)} in`;
+}
+
+function hasDxfReviewCue(comparison) {
+  const { widthDelta, heightDelta, aspectDelta } = comparison.deltas;
+  const closeDimension = widthDelta <= 0.18 || heightDelta <= 0.18;
+  return closeDimension && aspectDelta <= 0.16;
+}
+
+function findDxfUniqueFiles(files, exactGroups, nearMatches, holeVariants, reviewCandidates = []) {
   const matched = new Set();
   exactGroups.filter((group) => group.files.length > 1).forEach((group) => group.files.forEach((file) => matched.add(file)));
   nearMatches.forEach((group) => group.files.forEach((file) => matched.add(file)));
   holeVariants.forEach((group) => group.files.forEach((file) => matched.add(file)));
+  reviewCandidates.forEach((group) => group.files.forEach((file) => matched.add(file)));
   return files.filter((file) => !matched.has(file)).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function findDxfFileByQuery(files, query) {
+  const normalizedQuery = normalizeLookupText(query);
+  if (!normalizedQuery) return null;
+  return (
+    files.find((file) => normalizeLookupText(file.name) === normalizedQuery) ||
+    files.find((file) => normalizeLookupText(file.path) === normalizedQuery) ||
+    files.find((file) => normalizeLookupText(file.name).includes(normalizedQuery)) ||
+    files.find((file) => normalizeLookupText(file.path).includes(normalizedQuery)) ||
+    null
+  );
+}
+
+function findDxfClosestFiles(target, files, limit = 5) {
+  return files
+    .filter((file) => file !== target)
+    .map((file) => compareDxfSimilarity(target, file))
+    .sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path))
+    .slice(0, limit);
+}
+
+function compareDxfSimilarity(a, b) {
+  const holePattern = compareDxfHolePattern(a, b);
+  if (a.signature === b.signature) {
+    return { file: b, score: 100, type: "Exact profile", reasons: ["same normalized DXF profile", ...holePattern.differences], holePattern };
+  }
+
+  if (a.features.outerSignature && a.features.outerSignature === b.features.outerSignature) {
+    const type = classifyDxfHoleVariant([a, b]);
+    const score = Math.round(scoreDxfHoleVariant([a, b]) * 0.75 + holePattern.score * 0.25);
+    return { file: b, score, type, reasons: ["same outer profile", ...holePattern.differences], holePattern };
+  }
+
+  if (a.scaleSignature === b.scaleSignature) {
+    const score = Math.round(scoreDxfNearMatch([a, b]) * 0.8 + holePattern.score * 0.2);
+    return { file: b, score, type: "Near profile", reasons: ["same normalized shape at different size", ...holePattern.differences], holePattern };
+  }
+
+  const review = compareDxfReviewCandidate(a, b);
+  const hasComparableHoles = a.features.holeCount > 0 || b.features.holeCount > 0;
+  const score = hasComparableHoles ? Math.round(review.confidence * 0.7 + holePattern.score * 0.3) : Math.round(review.confidence);
+  return {
+    file: b,
+    score,
+    type: hasDxfReviewCue(review) ? "Review candidate" : "Low similarity",
+    reasons: [...(review.reasons.length ? review.reasons : ["nearest available dimensional comparison"]), ...holePattern.differences],
+    holePattern,
+  };
+}
+
+function normalizeLookupText(value) {
+  return String(value).toLowerCase().replace(/\.dxf$/i, "").replace(/[^a-z0-9]/g, "");
 }
 
 function classifyDxfHoleVariant(files) {
@@ -1257,11 +1556,39 @@ function scoreDxfNearMatch(files) {
 }
 
 function riskyIgnoredEntities(file) {
-  return Object.keys(file.geometry.ignored).filter((type) => ["SPLINE", "ELLIPSE", "INSERT", "HATCH", "BLOCK"].includes(type));
+  return Object.keys(file.geometry.ignored).filter((type) => ["SPLINE", "INSERT", "HATCH"].includes(type));
 }
 
 function ignoredEntityCount(file) {
-  return Object.values(file.geometry.ignored).reduce((sum, count) => sum + count, 0);
+  return nonProfileIgnoredEntities(file).reduce((sum, type) => sum + file.geometry.ignored[type], 0);
+}
+
+function nonProfileIgnoredEntities(file) {
+  const benign = new Set([
+    "ACDBDICTIONARYWDFLT",
+    "ACDBPLACEHOLDER",
+    "APPID",
+    "BLOCK",
+    "BLOCK_RECORD",
+    "CLASS",
+    "DICTIONARY",
+    "DIMSTYLE",
+    "ENDBLK",
+    "ENDSEC",
+    "ENDTAB",
+    "EOF",
+    "LAYER",
+    "LAYOUT",
+    "LTYPE",
+    "MLINESTYLE",
+    "SCALE",
+    "SECTION",
+    "STYLE",
+    "TABLE",
+    "VPORT",
+    "XRECORD",
+  ]);
+  return Object.keys(file.geometry.ignored).filter((type) => !benign.has(type));
 }
 
 function dxfSizeKey(bounds) {
@@ -1273,18 +1600,32 @@ function profileSize(file) {
   return Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
 }
 
+function sortedDxfDimensions(bounds) {
+  const dimensions = [bounds.maxX - bounds.minX, bounds.maxY - bounds.minY].sort((a, b) => a - b);
+  const width = Math.max(dimensions[0], 0.0001);
+  const height = Math.max(dimensions[1], 0.0001);
+  return {
+    width,
+    height,
+    aspect: width / height,
+    area: width * height,
+  };
+}
+
 function renderDxfResults(isLoading) {
   const summary = document.querySelector("#dxfSummary");
   const results = document.querySelector("#dxfResults");
   if (!summary || !results) return;
 
   const matchGroups = dxfState.groups.filter((group) => group.files.length > 1).length;
+  renderDxfLookup();
   summary.innerHTML = [
     ["DXFs", dxfState.files.length],
     ["Unique Parts", dxfState.uniqueFiles.length],
     ["Exact Matches", matchGroups],
     ["Near Matches", dxfState.nearMatches.length],
     ["Hole Variants", dxfState.holeVariants.length],
+    ["Review", dxfState.reviewCandidates.length],
   ]
     .map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`)
     .join("");
@@ -1330,6 +1671,17 @@ function renderDxfResults(isLoading) {
       ${dxfState.groups.filter((group) => group.files.length > 1).map(dxfGroupHtml).join("") || '<div class="empty">No exact profile matches found.</div>'}
     </section>
   `;
+  const reviewCandidateHtml = dxfState.reviewCandidates.length
+    ? `
+      <section class="dxf-section-block">
+        <div class="section-heading compact">
+          <h2>Similar Unique Parts</h2>
+          <p>Unique files with close dimensions, aspect ratio, hole count, or entity count. Review only; these are not treated as matches.</p>
+        </div>
+        ${dxfState.reviewCandidates.map(dxfReviewCandidateHtml).join("")}
+      </section>
+    `
+    : "";
   const uniqueHtml = `
     <section class="dxf-section-block">
       <div class="section-heading compact">
@@ -1339,7 +1691,38 @@ function renderDxfResults(isLoading) {
       ${dxfUniqueFilesHtml(dxfState.uniqueFiles)}
     </section>
   `;
-  results.innerHTML = holeVariantHtml + nearMatchHtml + exactHtml + uniqueHtml;
+  results.innerHTML = holeVariantHtml + nearMatchHtml + exactHtml + reviewCandidateHtml + uniqueHtml;
+}
+
+function renderDxfLookup() {
+  const input = document.querySelector("#dxfLookupInput");
+  const options = document.querySelector("#dxfLookupOptions");
+  const results = document.querySelector("#dxfLookupResults");
+  if (!input || !options || !results) return;
+
+  input.value = dxfState.lookupQuery;
+  input.disabled = !dxfState.files.length;
+  options.innerHTML = dxfState.files
+    .map((file) => `<option value="${escapeHtml(file.name)}">${escapeHtml(file.path)}</option>`)
+    .join("");
+
+  if (!dxfState.files.length) {
+    results.innerHTML = '<div class="empty compact">Load DXFs, then search a part to see its 5 closest candidates.</div>';
+    return;
+  }
+
+  const target = findDxfFileByQuery(dxfState.files, dxfState.lookupQuery);
+  if (!dxfState.lookupQuery.trim()) {
+    results.innerHTML = '<div class="empty compact">Type a loaded DXF filename or part number.</div>';
+    return;
+  }
+  if (!target) {
+    results.innerHTML = '<div class="empty compact">No loaded DXF matched that search.</div>';
+    return;
+  }
+
+  const matches = findDxfClosestFiles(target, dxfState.files, 5);
+  results.innerHTML = dxfClosestMatchesHtml(target, matches);
 }
 
 function dxfGroupHtml(group, index) {
@@ -1378,7 +1761,7 @@ function dxfGroupHtml(group, index) {
 
 function dxfIgnoredWarnings(files) {
   const risky = unique(files.flatMap(riskyIgnoredEntities));
-  const ignored = unique(files.flatMap((file) => Object.keys(file.geometry.ignored)));
+  const ignored = unique(files.flatMap(nonProfileIgnoredEntities));
   const warnings = [];
   if (risky.length) warnings.push(`Risky unsupported entities ignored: ${risky.join(", ")}.`);
   else if (ignored.length) warnings.push(`Non-profile entities ignored: ${ignored.join(", ")}.`);
@@ -1448,6 +1831,85 @@ function dxfHoleVariantHtml(group, index) {
       </div>
     </article>
   `;
+}
+
+function dxfReviewCandidateHtml(group, index) {
+  const files = group.files;
+  const fileList = files
+    .map((file) => {
+      const bounds = file.geometry.bounds;
+      const size = `${dxfRound(bounds.maxX - bounds.minX)} x ${dxfRound(bounds.maxY - bounds.minY)}`;
+      return `<li><strong>${escapeHtml(file.path)}</strong><span>${size} | ${file.features.holeCount} hole${file.features.holeCount === 1 ? "" : "s"}</span></li>`;
+    })
+    .join("");
+  const comparisons = group.comparisons
+    .map((comparison) => `<li><strong>${escapeHtml(comparison.a.name)} vs ${escapeHtml(comparison.b.name)}</strong><span>${comparison.confidence}%</span></li>`)
+    .join("");
+
+  return `
+    <article class="dxf-group review-candidate">
+      <div class="dxf-group-preview">${dxfPreviewSvg(files[0].geometry.primitives)}</div>
+      <div>
+        <div class="dxf-group-head">
+          <div>
+            <p class="cluster-type">Similar unique parts</p>
+            <h3>Review Candidate ${index + 1}</h3>
+          </div>
+          <span class="confidence warn">${group.confidence}% confidence</span>
+        </div>
+        <p class="cluster-reason">${escapeHtml(group.reasons.slice(0, 4).join(", "))}. These files remain unique, but are similar enough to inspect.</p>
+        <dl class="metrics">
+          <div><dt>Files</dt><dd>${files.length}</dd></div>
+          <div><dt>Smallest</dt><dd>${dxfSizeKey(files[0].geometry.bounds)}</dd></div>
+          <div><dt>Largest</dt><dd>${dxfSizeKey(files[files.length - 1].geometry.bounds)}</dd></div>
+        </dl>
+        <ul class="dxf-file-list">${fileList}</ul>
+        <ul class="dxf-file-list comparison-list">${comparisons}</ul>
+      </div>
+    </article>
+  `;
+}
+
+function dxfClosestMatchesHtml(target, matches) {
+  const targetSize = dxfSizeKey(target.geometry.bounds);
+  const matchItems = matches
+    .map((match, index) => {
+      const file = match.file;
+      const size = dxfSizeKey(file.geometry.bounds);
+      const reasons = dxfClosestMatchReasons(match).join(", ");
+      return `
+        <li>
+          <div>
+            <strong>${index + 1}. ${escapeHtml(file.path)}</strong>
+            <span>${escapeHtml(match.type)} | ${size} | ${file.features.holeCount} hole${file.features.holeCount === 1 ? "" : "s"}</span>
+            <small>${escapeHtml(reasons)}</small>
+          </div>
+          <b>${match.score}%</b>
+        </li>
+      `;
+    })
+    .join("");
+
+  return `
+    <article class="dxf-lookup-card">
+      <div>
+        <p class="cluster-type">Closest parts for</p>
+        <h3>${escapeHtml(target.path)}</h3>
+        <span>${targetSize} | ${target.features.holeCount} hole${target.features.holeCount === 1 ? "" : "s"}</span>
+      </div>
+      <ul class="dxf-match-list">${matchItems}</ul>
+    </article>
+  `;
+}
+
+function dxfClosestMatchReasons(match) {
+  const holeDifferences = match.holePattern?.differences || [];
+  const hasHoleData = match.holePattern && (match.file.features.holeCount > 0 || holeDifferences.some((reason) => !reason.includes("No hole")));
+  if (hasHoleData) {
+    const shapeReasons = match.reasons.filter((reason) => !holeDifferences.includes(reason)).slice(0, 2);
+    return [...shapeReasons, ...holeDifferences.slice(0, 4)].slice(0, 6);
+  }
+  return match.reasons.slice(0, 4);
 }
 
 function dxfUniqueFilesHtml(files) {
@@ -1577,6 +2039,11 @@ document.querySelector("#loadSampleDxfSet").addEventListener("click", () => {
   handleDxfFiles(makeSampleDxfFiles());
 });
 
+document.querySelector("#dxfLookupInput").addEventListener("input", (event) => {
+  dxfState.lookupQuery = event.target.value;
+  renderDxfLookup();
+});
+
 const dxfDropZone = document.querySelector("#dxfDropZone");
 dxfDropZone.addEventListener("dragover", (event) => {
   event.preventDefault();
@@ -1597,6 +2064,8 @@ window.dxfTools = {
   buildDxfScaleSignature,
   groupDxfFiles,
   findDxfNearMatches,
+  findDxfClosestFiles,
+  findDxfFileByQuery,
   shortSignature,
 };
 
