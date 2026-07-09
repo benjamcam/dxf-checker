@@ -138,6 +138,11 @@ function square(size) {
   ]));
 }
 
+function disk(diameter) {
+  const radius = diameter / 2;
+  return dxf(circle(radius, radius, radius));
+}
+
 function rectangle(width, height) {
   return dxf(lwPolyline([
     [0, 0],
@@ -488,6 +493,29 @@ const tests = [
     },
   },
   {
+    name: "review candidates require compatible outline families",
+    run() {
+      const files = [
+        makeFile("2in disk", disk(2)),
+        makeFile("2x2 square", square(2)),
+        makeFile("2x2 gusset", rightTriangle(2)),
+      ];
+      const exact = groupDxfFiles(files);
+      const near = findDxfNearMatches(files);
+      const holes = findDxfHoleVariants(files);
+      const review = findDxfReviewCandidates(files, exact, near, holes);
+      assert(review.length === 0, `expected no cross-family review candidates, found ${review.length}`);
+    },
+  },
+  {
+    name: "circle-only DXFs are treated as round outer profiles",
+    run() {
+      const file = makeFile("2in disk", disk(2));
+      assert(file.features.outline.family === "round", `expected round outline, found ${file.features.outline.family}`);
+      assert(file.features.holeCount === 0, `expected disk to have 0 holes, found ${file.features.holeCount}`);
+    },
+  },
+  {
     name: "review candidates are not listed as unique parts",
     run() {
       const files = [
@@ -507,7 +535,7 @@ const tests = [
     },
   },
   {
-    name: "closest lookup returns five ranked candidates",
+    name: "closest lookup returns ranked qualifying candidates",
     run() {
       const files = [
         makeFile("target 6x12 plate", rectangle(6, 12)),
@@ -520,10 +548,24 @@ const tests = [
       ];
       const target = findDxfFileByQuery(files, "target");
       const closest = findDxfClosestFiles(target, files, 5);
-      assert(closest.length === 5, `expected 5 closest files, found ${closest.length}`);
+      assert(closest.length === 4, `expected 4 qualifying files, found ${closest.length}`);
       assert(closest[0].file.name === "exact copy", `expected exact copy first, found ${closest[0].file.name}`);
       assert(closest[0].score === 100, `expected exact copy score 100, found ${closest[0].score}`);
+      assert(!closest.some((match) => match.file.name === "long narrow plate"), "low-similarity part was incorrectly included");
       assert(closest.every((match, index) => index === 0 || closest[index - 1].score >= match.score), "closest matches were not score-sorted");
+    },
+  },
+  {
+    name: "closest lookup uses same review family criteria",
+    run() {
+      const files = [
+        makeFile("2in disk", disk(2)),
+        makeFile("2x2 square", square(2)),
+        makeFile("2x2 gusset", rightTriangle(2)),
+      ];
+      const target = findDxfFileByQuery(files, "disk");
+      const closest = findDxfClosestFiles(target, files, 5);
+      assert(closest.length === 0, `expected no cross-family closest matches, found ${closest.length}`);
     },
   },
   {

@@ -82,13 +82,13 @@
           </aside>
         </div>
         <section class="dxf-lookup" aria-label="Closest DXF search">
-          <label for="dxfLookupInput">Find closest parts</label>
+          <label for="dxfLookupInput">Find matching parts</label>
           <div class="dxf-lookup-row">
             <input id="dxfLookupInput" type="search" list="dxfLookupOptions" placeholder="Type a loaded DXF filename or part number">
             <datalist id="dxfLookupOptions"></datalist>
           </div>
           <div id="dxfLookupResults" class="dxf-lookup-results">
-            <div class="empty compact">Load DXFs, then search a part to see its 5 closest candidates.</div>
+            <div class="empty compact">Load DXFs, then search a part to see qualifying candidates.</div>
           </div>
         </section>
         <div id="dxfResults" class="dxf-results">
@@ -168,6 +168,6 @@
       </article>
     </template>
 
-    <script src="app.js?v=20260706a"></script>
+    <script src="app.js?v=20260708b"></script>
   </body>
 </html>

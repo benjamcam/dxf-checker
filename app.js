@@ -442,6 +442,10 @@ function unique(values) {
   return [...new Set(values)].sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
 }
 
+function uniqueInOrder(values) {
+  return [...new Set(values)];
+}
+
 function renderParts() {
   const container = document.querySelector("#partResults");
   const results = filteredParts();
@@ -924,8 +928,8 @@ function buildDxfFeatureSignatures(primitives) {
   const variants = transformVariants(primitives).map((variant) => {
     const bounds = primitiveBounds(variant);
     const normalized = variant.map((primitive) => offsetPrimitive(primitive, -bounds.minX, -bounds.minY));
-    const holes = normalized.filter((primitive) => primitive.type === "circle");
-    const outer = normalized.filter((primitive) => primitive.type !== "circle");
+    const { outer, holes } = splitDxfOuterAndHoles(normalized);
+    const outline = dxfOutlineFeatures(outer);
     return {
       outerSignature: tessellatedSignature(outer),
       holeSignature: holes.map(primitiveSignature).sort().join(";"),
@@ -933,6 +937,7 @@ function buildDxfFeatureSignatures(primitives) {
       holeRadiiSignature: holes.map((hole) => dxfRound(hole.radius)).sort().join(";"),
       holes: holes.map((hole) => ({ center: hole.center, radius: hole.radius })).sort(compareDxfHoles),
       holeCount: holes.length,
+      outline,
     };
   });
 
@@ -941,6 +946,31 @@ function buildDxfFeatureSignatures(primitives) {
     const right = `${b.outerSignature}|${b.holeSignature}`;
     return left.localeCompare(right);
   })[0];
+}
+
+function splitDxfOuterAndHoles(primitives) {
+  const nonCircles = primitives.filter((primitive) => primitive.type !== "circle");
+  const circles = primitives.filter((primitive) => primitive.type === "circle");
+  if (nonCircles.length || !circles.length) return { outer: nonCircles, holes: circles };
+
+  const sortedCircles = [...circles].sort((a, b) => b.radius - a.radius);
+  return { outer: [sortedCircles[0]], holes: sortedCircles.slice(1) };
+}
+
+function dxfOutlineFeatures(outer) {
+  const lineCount = outer.filter((primitive) => primitive.type === "line").length;
+  const arcCount = outer.filter((primitive) => primitive.type === "arc").length;
+  const circleCount = outer.filter((primitive) => primitive.type === "circle").length;
+  const segmentCount = lineCount + arcCount + circleCount;
+  let family = "complex";
+
+  if (circleCount && !lineCount && !arcCount) family = "round";
+  else if (arcCount) family = "rounded";
+  else if (lineCount === 3) family = "triangle";
+  else if (lineCount === 4) family = "quadrilateral";
+  else if (lineCount >= 5 && lineCount <= 8) family = "simple-polygon";
+
+  return { family, lineCount, arcCount, circleCount, segmentCount };
 }
 
 function transformVariants(primitives) {
@@ -1265,7 +1295,7 @@ function findDxfReviewCandidates(files, exactGroups, nearMatches, holeVariants) 
     }
 
     const groupLinks = links.filter((link) => groupFiles.includes(link.a) && groupFiles.includes(link.b));
-    const reasons = unique(groupLinks.flatMap((link) => link.reasons));
+    const reasons = uniqueInOrder(groupLinks.flatMap((link) => link.reasons));
     const confidence = Math.round(groupLinks.reduce((best, link) => Math.max(best, link.confidence), 0));
     groups.push({
       files: groupFiles.sort((a, b) => profileSize(a) - profileSize(b) || a.path.localeCompare(b.path)),
@@ -1281,6 +1311,7 @@ function findDxfReviewCandidates(files, exactGroups, nearMatches, holeVariants) 
 function compareDxfReviewCandidate(a, b) {
   const aDimensions = sortedDxfDimensions(a.geometry.bounds);
   const bDimensions = sortedDxfDimensions(b.geometry.bounds);
+  const outline = compareDxfOutlineFamily(a, b);
   const widthDelta = relativeDelta(aDimensions.width, bDimensions.width);
   const heightDelta = relativeDelta(aDimensions.height, bDimensions.height);
   const aspectDelta = relativeDelta(aDimensions.aspect, bDimensions.aspect);
@@ -1288,6 +1319,14 @@ function compareDxfReviewCandidate(a, b) {
   const entityDelta = relativeDelta(a.geometry.entityCount, b.geometry.entityCount);
   const reasons = [];
   let confidence = 42;
+
+  if (outline.compatible) {
+    confidence += outline.score;
+    reasons.push(outline.reason);
+  } else {
+    confidence -= 28;
+    reasons.push(outline.reason);
+  }
 
   if (widthDelta <= 0.03) {
     confidence += 18;
@@ -1340,6 +1379,39 @@ function compareDxfReviewCandidate(a, b) {
     confidence: Math.max(0, Math.min(86, confidence)),
     reasons,
     deltas: { widthDelta, heightDelta, aspectDelta, areaDelta },
+    outline,
+  };
+}
+
+function compareDxfOutlineFamily(a, b) {
+  const left = a.features.outline || {};
+  const right = b.features.outline || {};
+  if (!left.family || !right.family) return { compatible: false, score: 0, reason: "missing outline family" };
+  if (left.family !== right.family) {
+    return { compatible: false, score: 0, reason: `${left.family} outline vs ${right.family} outline` };
+  }
+
+  const lineDelta = Math.abs((left.lineCount || 0) - (right.lineCount || 0));
+  const arcDelta = Math.abs((left.arcCount || 0) - (right.arcCount || 0));
+  const segmentDelta = Math.abs((left.segmentCount || 0) - (right.segmentCount || 0));
+  let score = 16;
+  const reasons = [`same ${left.family} outline family`];
+
+  if (lineDelta === 0 && arcDelta === 0) {
+    score += 10;
+    reasons.push("same outline entity mix");
+  } else if (segmentDelta <= 2) {
+    score += 4;
+    reasons.push("similar outline entity count");
+  } else {
+    score -= 12;
+    reasons.push("different outline complexity");
+  }
+
+  return {
+    compatible: segmentDelta <= Math.max(2, Math.ceil(Math.max(left.segmentCount || 0, right.segmentCount || 0) * 0.25)),
+    score,
+    reason: reasons.join(", "),
   };
 }
 
@@ -1463,7 +1535,7 @@ function formatInches(value) {
 function hasDxfReviewCue(comparison) {
   const { widthDelta, heightDelta, aspectDelta } = comparison.deltas;
   const closeDimension = widthDelta <= 0.18 || heightDelta <= 0.18;
-  return closeDimension && aspectDelta <= 0.16;
+  return comparison.outline.compatible && closeDimension && aspectDelta <= 0.16;
 }
 
 function findDxfUniqueFiles(files, exactGroups, nearMatches, holeVariants, reviewCandidates = []) {
@@ -1491,6 +1563,7 @@ function findDxfClosestFiles(target, files, limit = 5) {
   return files
     .filter((file) => file !== target)
     .map((file) => compareDxfSimilarity(target, file))
+    .filter((match) => match.type !== "Low similarity")
     .sort((a, b) => b.score - a.score || a.file.path.localeCompare(b.file.path))
     .slice(0, limit);
 }
@@ -1676,7 +1749,7 @@ function renderDxfResults(isLoading) {
       <section class="dxf-section-block">
         <div class="section-heading compact">
           <h2>Similar Unique Parts</h2>
-          <p>Unique files with close dimensions, aspect ratio, hole count, or entity count. Review only; these are not treated as matches.</p>
+          <p>Unique files with compatible outline families plus close dimensions, hole count, or entity count. Review only; these are not treated as matches.</p>
         </div>
         ${dxfState.reviewCandidates.map(dxfReviewCandidateHtml).join("")}
       </section>
@@ -1707,7 +1780,7 @@ function renderDxfLookup() {
     .join("");
 
   if (!dxfState.files.length) {
-    results.innerHTML = '<div class="empty compact">Load DXFs, then search a part to see its 5 closest candidates.</div>';
+    results.innerHTML = '<div class="empty compact">Load DXFs, then search a part to see qualifying candidates.</div>';
     return;
   }
 
@@ -1857,7 +1930,7 @@ function dxfReviewCandidateHtml(group, index) {
           </div>
           <span class="confidence warn">${group.confidence}% confidence</span>
         </div>
-        <p class="cluster-reason">${escapeHtml(group.reasons.slice(0, 4).join(", "))}. These files remain unique, but are similar enough to inspect.</p>
+        <p class="cluster-reason">${escapeHtml(group.reasons.slice(0, 4).join(", "))}. These files remain unique, but share enough outline and dimension signals to inspect.</p>
         <dl class="metrics">
           <div><dt>Files</dt><dd>${files.length}</dd></div>
           <div><dt>Smallest</dt><dd>${dxfSizeKey(files[0].geometry.bounds)}</dd></div>
@@ -1872,28 +1945,30 @@ function dxfReviewCandidateHtml(group, index) {
 
 function dxfClosestMatchesHtml(target, matches) {
   const targetSize = dxfSizeKey(target.geometry.bounds);
-  const matchItems = matches
-    .map((match, index) => {
-      const file = match.file;
-      const size = dxfSizeKey(file.geometry.bounds);
-      const reasons = dxfClosestMatchReasons(match).join(", ");
-      return `
-        <li>
-          <div>
-            <strong>${index + 1}. ${escapeHtml(file.path)}</strong>
-            <span>${escapeHtml(match.type)} | ${size} | ${file.features.holeCount} hole${file.features.holeCount === 1 ? "" : "s"}</span>
-            <small>${escapeHtml(reasons)}</small>
-          </div>
-          <b>${match.score}%</b>
-        </li>
-      `;
-    })
-    .join("");
+  const matchItems = matches.length
+    ? matches
+      .map((match, index) => {
+        const file = match.file;
+        const size = dxfSizeKey(file.geometry.bounds);
+        const reasons = dxfClosestMatchReasons(match).join(", ");
+        return `
+          <li>
+            <div>
+              <strong>${index + 1}. ${escapeHtml(file.path)}</strong>
+              <span>${escapeHtml(match.type)} | ${size} | ${file.features.holeCount} hole${file.features.holeCount === 1 ? "" : "s"}</span>
+              <small>${escapeHtml(reasons)}</small>
+            </div>
+            <b>${match.score}%</b>
+          </li>
+        `;
+      })
+      .join("")
+    : '<li><div><strong>No qualifying matches found.</strong><span>This part does not meet the same exact, near, hole-variant, or compatible-outline review criteria with any loaded DXF.</span></div></li>';
 
   return `
     <article class="dxf-lookup-card">
       <div>
-        <p class="cluster-type">Closest parts for</p>
+        <p class="cluster-type">Matching parts for</p>
         <h3>${escapeHtml(target.path)}</h3>
         <span>${targetSize} | ${target.features.holeCount} hole${target.features.holeCount === 1 ? "" : "s"}</span>
       </div>
