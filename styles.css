@@ -478,9 +478,73 @@ input[type="file"] {
   gap: 18px;
 }
 
+.dxf-result-tabs {
+  display: grid;
+  gap: 14px;
+}
+
+.dxf-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.dxf-subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+}
+
+.dxf-subtab.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 750;
+  background: #f5fbf9;
+}
+
+.dxf-subtab b {
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.dxf-subtab.is-active b {
+  background: var(--accent);
+  color: white;
+}
+
+.dxf-result-panel {
+  min-width: 0;
+}
+
 .dxf-section-block {
   display: grid;
   gap: 12px;
+}
+
+.dxf-revision-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px 12px;
+  border: 1px solid #d7cc8a;
+  border-radius: 8px;
+  background: #fffef5;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.dxf-revision-note span {
+  color: var(--muted);
 }
 
 .section-heading.compact {

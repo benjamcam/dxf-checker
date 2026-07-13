@@ -7,5 +7,5 @@ build/
 *.log
 
 # Local/customer DXF test data
-DXF Test Folder.zip
-DXF Test Folder/
+DXF Test Folder*.zip
+DXF Test Folder*/

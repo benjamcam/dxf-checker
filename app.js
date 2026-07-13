@@ -184,7 +184,10 @@ const dxfState = {
   reviewCandidates: [],
   uniqueFiles: [],
   errors: [],
+  skippedRevisions: [],
   lookupQuery: "",
+  activeResultTab: "exact",
+  loadingProgress: null,
 };
 const state = {
   view: "engineer",
@@ -710,8 +713,65 @@ function makeSampleDxfFiles() {
   }));
 }
 
+function filterLatestDxfRevisions(files) {
+  const byPartNumber = new Map();
+  const passthrough = [];
+
+  files.forEach((file) => {
+    const revision = dxfRevisionInfo(file.name);
+    if (!revision) {
+      passthrough.push(file);
+      return;
+    }
+
+    if (!byPartNumber.has(revision.partNumber)) byPartNumber.set(revision.partNumber, []);
+    byPartNumber.get(revision.partNumber).push({ file, revision });
+  });
+
+  const selected = [...passthrough];
+  const skipped = [];
+
+  byPartNumber.forEach((entries, partNumber) => {
+    const latestRank = Math.max(...entries.map((entry) => entry.revision.rank));
+    const latest = entries.filter((entry) => entry.revision.rank === latestRank);
+    latest.forEach((entry) => selected.push(entry.file));
+    entries
+      .filter((entry) => entry.revision.rank < latestRank)
+      .forEach((entry) => {
+        skipped.push({
+          name: entry.file.name,
+          partNumber,
+          revision: entry.revision.revision || "base",
+          keptRevision: latest[0].revision.revision || "base",
+        });
+      });
+  });
+
+  return {
+    files: selected.sort((a, b) => dxfFilePath(a).localeCompare(dxfFilePath(b))),
+    skipped: skipped.sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function dxfRevisionInfo(filename) {
+  const baseName = filename.split(/[\\/]/).pop() || filename;
+  const match = baseName.match(/^(\d{9})([A-Za-z]?)/);
+  if (!match) return null;
+  const revision = match[2] ? match[2].toUpperCase() : "";
+  return {
+    partNumber: match[1],
+    revision,
+    rank: revision ? revision.charCodeAt(0) - 64 : 0,
+  };
+}
+
+function dxfFilePath(file) {
+  return file.webkitRelativePath || file.relativePath || file.name;
+}
+
 async function handleDxfFiles(fileList) {
-  const files = [...fileList].filter((file) => file.name.toLowerCase().endsWith(".dxf"));
+  const allDxfFiles = [...fileList].filter((file) => file.name.toLowerCase().endsWith(".dxf"));
+  const { files, skipped } = filterLatestDxfRevisions(allDxfFiles);
   dxfState.files = [];
   dxfState.groups = [];
   dxfState.nearMatches = [];
@@ -719,40 +779,63 @@ async function handleDxfFiles(fileList) {
   dxfState.reviewCandidates = [];
   dxfState.uniqueFiles = [];
   dxfState.errors = [];
+  dxfState.skippedRevisions = skipped;
   dxfState.lookupQuery = "";
+  dxfState.loadingProgress = { done: 0, total: files.length, label: "Reading DXFs" };
   renderDxfResults(true);
 
-  const parsed = await Promise.all(
-    files.map(async (file) => {
-      try {
-        const text = await file.text();
-        const geometry = parseDxf(text);
-        const signature = buildDxfSignature(geometry.primitives);
-        const scaleSignature = buildDxfScaleSignature(geometry.primitives);
-        const features = buildDxfFeatureSignatures(geometry.primitives);
-        return {
-          name: file.name,
-          path: file.webkitRelativePath || file.relativePath || file.name,
-          size: file.size,
-          geometry,
-          signature,
-          scaleSignature,
-          features,
-        };
-      } catch (error) {
-        dxfState.errors.push(`${file.name}: ${error.message}`);
-        return null;
-      }
-    }),
-  );
+  const parsed = [];
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    try {
+      const text = await file.text();
+      const geometry = parseDxf(text);
+      const signature = buildDxfSignature(geometry.primitives);
+      const scaleSignature = buildDxfScaleSignature(geometry.primitives);
+      const features = buildDxfFeatureSignatures(geometry.primitives);
+      parsed.push({
+        name: file.name,
+        path: dxfFilePath(file),
+        size: file.size,
+        geometry,
+        signature,
+        scaleSignature,
+        features,
+      });
+    } catch (error) {
+      dxfState.errors.push(`${file.name}: ${error.message}`);
+    }
 
-  dxfState.files = parsed.filter(Boolean);
+    if ((index + 1) % 10 === 0 || index === files.length - 1) {
+      dxfState.loadingProgress = { done: index + 1, total: files.length, label: "Reading DXFs" };
+      renderDxfResults(true);
+      await nextBrowserFrame();
+    }
+  }
+
+  dxfState.loadingProgress = { done: files.length, total: files.length, label: "Comparing profiles" };
+  renderDxfResults(true);
+  await nextBrowserFrame();
+
+  dxfState.files = parsed;
   dxfState.groups = groupDxfFiles(dxfState.files);
+  await nextBrowserFrame();
   dxfState.nearMatches = findDxfNearMatches(dxfState.files);
+  await nextBrowserFrame();
   dxfState.holeVariants = findDxfHoleVariants(dxfState.files);
+  await nextBrowserFrame();
   dxfState.reviewCandidates = findDxfReviewCandidates(dxfState.files, dxfState.groups, dxfState.nearMatches, dxfState.holeVariants);
+  await nextBrowserFrame();
   dxfState.uniqueFiles = findDxfUniqueFiles(dxfState.files, dxfState.groups, dxfState.nearMatches, dxfState.holeVariants, dxfState.reviewCandidates);
+  dxfState.loadingProgress = null;
   renderDxfResults(false);
+}
+
+function nextBrowserFrame() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
 }
 
 function parseDxf(text) {
@@ -912,6 +995,15 @@ function buildDxfSignature(primitives) {
   return signatures.sort()[0];
 }
 
+function buildDxfFlatSignature(primitives) {
+  const signatures = transformVariants(primitives).map((variant) => {
+    const bounds = primitiveBounds(variant);
+    const normalized = variant.map((primitive) => offsetPrimitive(primitive, -bounds.minX, -bounds.minY));
+    return tessellatedSignature(normalized, 3);
+  });
+  return signatures.sort()[0];
+}
+
 function buildDxfScaleSignature(primitives) {
   const signatures = transformVariants(primitives).map((variant) => {
     const bounds = primitiveBounds(variant);
@@ -932,7 +1024,7 @@ function buildDxfFeatureSignatures(primitives) {
     const outline = dxfOutlineFeatures(outer);
     return {
       outerSignature: tessellatedSignature(outer),
-      holeSignature: holes.map(primitiveSignature).sort().join(";"),
+      holeSignature: holes.map((hole) => primitiveSignature(hole)).sort().join(";"),
       holeCenterSignature: holes.map((hole) => pointSignature(hole.center)).sort().join(";"),
       holeRadiiSignature: holes.map((hole) => dxfRound(hole.radius)).sort().join(";"),
       holes: holes.map((hole) => ({ center: hole.center, radius: hole.radius })).sort(compareDxfHoles),
@@ -991,14 +1083,14 @@ function transformPrimitive(primitive, rotation, mirror) {
     return { type: "circle", center: transformPoint(primitive.center, rotation, mirror), radius: primitive.radius };
   }
 
-  const startPoint = transformPoint(pointOnArc(primitive, primitive.start), rotation, mirror);
-  const endPoint = transformPoint(pointOnArc(primitive, primitive.end), rotation, mirror);
+  const start = transformArcAngle(primitive.start, rotation, mirror);
+  const end = transformArcAngle(primitive.end, rotation, mirror);
   return {
     type: "arc",
     center: transformPoint(primitive.center, rotation, mirror),
     radius: primitive.radius,
-    startPoint,
-    endPoint,
+    start: mirror ? end : start,
+    end: mirror ? start : end,
   };
 }
 
@@ -1008,6 +1100,11 @@ function transformPoint(point, rotation, mirror) {
   if (rotation === 180) return { x: -source.x, y: -source.y };
   if (rotation === 270) return { x: source.y, y: -source.x };
   return { x: source.x, y: source.y };
+}
+
+function transformArcAngle(angle, rotation, mirror) {
+  const mirrored = mirror ? 180 - angle : angle;
+  return normalizedDegrees(mirrored + rotation);
 }
 
 function pointOnArc(primitive, angle) {
@@ -1040,13 +1137,19 @@ function offsetPrimitive(primitive, x, y) {
   if (primitive.type === "circle") {
     return { type: "circle", center: offsetPoint(primitive.center, x, y), radius: primitive.radius };
   }
-  return {
+  const offset = {
     type: "arc",
     center: offsetPoint(primitive.center, x, y),
     radius: primitive.radius,
-    startPoint: offsetPoint(primitive.startPoint, x, y),
-    endPoint: offsetPoint(primitive.endPoint, x, y),
   };
+  if (primitive.startPoint && primitive.endPoint) {
+    return {
+      ...offset,
+      startPoint: offsetPoint(primitive.startPoint, x, y),
+      endPoint: offsetPoint(primitive.endPoint, x, y),
+    };
+  }
+  return { ...offset, start: primitive.start, end: primitive.end };
 }
 
 function offsetPoint(point, x, y) {
@@ -1082,20 +1185,22 @@ function scalePoint(point, scale) {
   return { x: point.x * scale, y: point.y * scale };
 }
 
-function primitiveSignature(primitive) {
+function primitiveSignature(primitive, precision = 4) {
   if (primitive.type === "line") {
-    const points = [pointSignature(primitive.a), pointSignature(primitive.b)].sort();
+    const points = [pointSignature(primitive.a, precision), pointSignature(primitive.b, precision)].sort();
     return `L:${points.join(">")}`;
   }
   if (primitive.type === "circle") {
-    return `C:${pointSignature(primitive.center)}:R${dxfRound(primitive.radius)}`;
+    return `C:${pointSignature(primitive.center, precision)}:R${dxfRound(primitive.radius, precision)}`;
   }
-  const points = [pointSignature(primitive.startPoint), pointSignature(primitive.endPoint)].sort();
-  return `A:${pointSignature(primitive.center)}:R${dxfRound(primitive.radius)}:${points.join(">")}`;
+  const startPoint = primitive.startPoint || pointOnArc(primitive, primitive.start);
+  const endPoint = primitive.endPoint || pointOnArc(primitive, primitive.end);
+  const points = [pointSignature(startPoint, precision), pointSignature(endPoint, precision)].sort();
+  return `A:${pointSignature(primitive.center, precision)}:R${dxfRound(primitive.radius, precision)}:${points.join(">")}`;
 }
 
-function tessellatedSignature(primitives) {
-  return primitives.flatMap(tessellatedSegments).map(primitiveSignature).sort().join(";");
+function tessellatedSignature(primitives, precision = 4) {
+  return tessellatedSignatureItems(primitives, precision).join(";");
 }
 
 function tessellatedSegments(primitive) {
@@ -1150,16 +1255,16 @@ function normalizedDegrees(value) {
   return normalized;
 }
 
-function pointSignature(point) {
-  return `${dxfRound(point.x)},${dxfRound(point.y)}`;
+function pointSignature(point, precision = 4) {
+  return `${dxfRound(point.x, precision)},${dxfRound(point.y, precision)}`;
 }
 
 function compareDxfHoles(a, b) {
   return a.center.x - b.center.x || a.center.y - b.center.y || a.radius - b.radius;
 }
 
-function dxfRound(value) {
-  return Number(value).toFixed(4).replace(/\.?0+$/, "");
+function dxfRound(value, precision = 4) {
+  return Number(value).toFixed(precision).replace(/\.?0+$/, "");
 }
 
 function primitiveBounds(primitives) {
@@ -1170,6 +1275,52 @@ function primitiveBounds(primitives) {
     maxX: Math.max(...points.map((point) => point.x)),
     maxY: Math.max(...points.map((point) => point.y)),
   };
+}
+
+function closedLineProfileArea(primitives) {
+  const lines = primitives.filter((primitive) => primitive.type === "line");
+  if (!lines.length || lines.length !== primitives.filter((primitive) => primitive.type !== "circle").length) return null;
+
+  const points = new Map();
+  const neighbors = new Map();
+  const addPoint = (point) => {
+    const key = pointSignature(point);
+    if (!points.has(key)) points.set(key, point);
+    if (!neighbors.has(key)) neighbors.set(key, []);
+    return key;
+  };
+
+  lines.forEach((line) => {
+    const a = addPoint(line.a);
+    const b = addPoint(line.b);
+    neighbors.get(a).push(b);
+    neighbors.get(b).push(a);
+  });
+
+  if ([...neighbors.values()].some((items) => items.length !== 2)) return null;
+
+  const start = addPoint(lines[0].a);
+  const path = [start];
+  let previous = null;
+  let current = start;
+  for (let step = 0; step < lines.length; step += 1) {
+    const next = neighbors.get(current).find((candidate) => candidate !== previous);
+    if (!next) return null;
+    previous = current;
+    current = next;
+    path.push(current);
+    if (current === start) break;
+  }
+
+  if (path[path.length - 1] !== start || path.length !== lines.length + 1) return null;
+
+  let area = 0;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const left = points.get(path[index]);
+    const right = points.get(path[index + 1]);
+    area += left.x * right.y - right.x * left.y;
+  }
+  return Math.abs(area) / 2;
 }
 
 function primitivePoints(primitive) {
@@ -1192,13 +1343,51 @@ function primitivePoints(primitive) {
 }
 
 function groupDxfFiles(files) {
+  const parents = new Map(files.map((file) => [file, file]));
+  const find = (file) => {
+    let parent = parents.get(file);
+    while (parent !== parents.get(parent)) parent = parents.get(parent);
+    parents.set(file, parent);
+    return parent;
+  };
+  const union = (a, b) => {
+    const rootA = find(a);
+    const rootB = find(b);
+    if (rootA !== rootB) parents.set(rootB, rootA);
+  };
+
   const bySignature = new Map();
   files.forEach((file) => {
     if (!bySignature.has(file.signature)) bySignature.set(file.signature, []);
     bySignature.get(file.signature).push(file);
   });
+  bySignature.forEach((group) => {
+    for (let index = 1; index < group.length; index += 1) union(group[0], group[index]);
+  });
 
-  return [...bySignature.values()]
+  const byFlatCandidate = new Map();
+  files.forEach((file) => {
+    const key = dxfFlatCandidateKey(file);
+    if (!byFlatCandidate.has(key)) byFlatCandidate.set(key, []);
+    byFlatCandidate.get(key).push(file);
+  });
+  byFlatCandidate.forEach((candidates) => {
+    if (candidates.length > 30) return;
+    for (let leftIndex = 0; leftIndex < candidates.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < candidates.length; rightIndex += 1) {
+        if (areDxfFlatEquivalent(candidates[leftIndex], candidates[rightIndex])) union(candidates[leftIndex], candidates[rightIndex]);
+      }
+    }
+  });
+
+  const byRoot = new Map();
+  files.forEach((file) => {
+    const root = find(file);
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(file);
+  });
+
+  return [...byRoot.values()]
     .map((group) => ({
       files: group.sort((a, b) => a.path.localeCompare(b.path)),
       signature: group[0].signature,
@@ -1207,6 +1396,99 @@ function groupDxfFiles(files) {
       confidence: scoreDxfExactGroup(group),
     }))
     .sort((a, b) => b.files.length - a.files.length || a.files[0].path.localeCompare(b.files[0].path));
+}
+
+function dxfFlatCandidateKey(file) {
+  const dimensions = sortedDxfDimensions(file.geometry.bounds);
+  const profileArea = closedLineProfileArea(file.geometry.primitives);
+  return [
+    dxfRound(dimensions.width, 3),
+    dxfRound(dimensions.height, 3),
+    file.features?.holeCount || 0,
+    file.features?.holeRadiiSignature || "",
+    file.features?.holeCenterSignature || "",
+    profileArea === null ? "area:unknown" : `area:${dxfRound(profileArea, 3)}`,
+  ].join("|");
+}
+
+function areDxfFlatEquivalent(a, b) {
+  if (a.signature === b.signature) return true;
+  if (dxfFlatCandidateKey(a) !== dxfFlatCandidateKey(b)) return false;
+
+  const holePattern = compareDxfHolePattern(a, b);
+  if (
+    (holePattern.maxDiameterDelta || 0) > 0.005 ||
+    (holePattern.maxCenterDelta || 0) > 0.01 ||
+    (holePattern.maxSpacingDelta || 0) > 0.01
+  ) {
+    return false;
+  }
+
+  if (getDxfFlatSignature(a) === getDxfFlatSignature(b)) return true;
+  return bestDxfSegmentCoverage(a.geometry.primitives, b.geometry.primitives) >= 0.985;
+}
+
+function getDxfFlatSignature(file) {
+  if (!file.flatSignature) file.flatSignature = buildDxfFlatSignature(file.geometry.primitives);
+  return file.flatSignature;
+}
+
+function bestDxfSegmentCoverage(aPrimitives, bPrimitives) {
+  const bSegments = lineSegmentsForCoverage(bPrimitives);
+  if (!bSegments.length) return 0;
+
+  return Math.max(...transformVariants(aPrimitives).map((variant) => {
+    const aBounds = primitiveBounds(variant);
+    const bBounds = primitiveBounds(bPrimitives);
+    const aligned = variant.map((primitive) => offsetPrimitive(primitive, bBounds.minX - aBounds.minX, bBounds.minY - aBounds.minY));
+    const aSegments = lineSegmentsForCoverage(aligned);
+    return Math.min(dxfSegmentCoverage(aSegments, bSegments), dxfSegmentCoverage(bSegments, aSegments));
+  }));
+}
+
+function lineSegmentsForCoverage(primitives) {
+  return primitives.flatMap(tessellatedSegments).filter((segment) => segment.type === "line");
+}
+
+function dxfSegmentCoverage(sourceSegments, targetSegments) {
+  if (!sourceSegments.length || !targetSegments.length) return 0;
+  const covered = sourceSegments.filter((segment) => dxfSegmentCoveredBy(segment, targetSegments)).length;
+  return covered / sourceSegments.length;
+}
+
+function dxfSegmentCoveredBy(segment, targetSegments) {
+  const midpoint = {
+    x: (segment.a.x + segment.b.x) / 2,
+    y: (segment.a.y + segment.b.y) / 2,
+  };
+  return [segment.a, midpoint, segment.b].every((point) => targetSegments.some((target) => pointToSegmentDistance(point, target) <= 0.003));
+}
+
+function pointToSegmentDistance(point, segment) {
+  const dx = segment.b.x - segment.a.x;
+  const dy = segment.b.y - segment.a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (!lengthSquared) return Math.hypot(point.x - segment.a.x, point.y - segment.a.y);
+  const t = Math.max(0, Math.min(1, ((point.x - segment.a.x) * dx + (point.y - segment.a.y) * dy) / lengthSquared));
+  const projected = { x: segment.a.x + t * dx, y: segment.a.y + t * dy };
+  return Math.hypot(point.x - projected.x, point.y - projected.y);
+}
+
+function tessellatedSignatureItems(primitives, precision = 4) {
+  return primitives.flatMap(tessellatedSegments).map((primitive) => primitiveSignature(primitive, precision)).sort();
+}
+
+function dxfSignatureOverlap(left, right) {
+  const counts = new Map();
+  right.forEach((signature) => counts.set(signature, (counts.get(signature) || 0) + 1));
+  let matches = 0;
+  left.forEach((signature) => {
+    const count = counts.get(signature) || 0;
+    if (!count) return;
+    matches += 1;
+    counts.set(signature, count - 1);
+  });
+  return matches;
 }
 
 function scoreDxfExactGroup(files) {
@@ -1264,67 +1546,47 @@ function findDxfHoleVariants(files) {
 function findDxfReviewCandidates(files, exactGroups, nearMatches, holeVariants) {
   const uniqueFiles = findDxfUniqueFiles(files, exactGroups, nearMatches, holeVariants);
   const links = [];
+  const minimumConfidence = 74;
 
   for (let leftIndex = 0; leftIndex < uniqueFiles.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < uniqueFiles.length; rightIndex += 1) {
       const comparison = compareDxfReviewCandidate(uniqueFiles[leftIndex], uniqueFiles[rightIndex]);
-      if (comparison.confidence >= 52 && hasDxfReviewCue(comparison)) links.push(comparison);
+      if (comparison.confidence >= minimumConfidence && hasDxfReviewCue(comparison)) links.push(comparison);
     }
   }
 
-  const linkedFiles = new Set(links.flatMap((link) => [link.a, link.b]));
-  const groups = [];
-  const seen = new Set();
-
-  linkedFiles.forEach((file) => {
-    if (seen.has(file)) return;
-    const queue = [file];
-    const groupFiles = [];
-    seen.add(file);
-
-    while (queue.length) {
-      const current = queue.shift();
-      groupFiles.push(current);
-      links.forEach((link) => {
-        const next = link.a === current ? link.b : link.b === current ? link.a : null;
-        if (next && !seen.has(next)) {
-          seen.add(next);
-          queue.push(next);
-        }
-      });
-    }
-
-    const groupLinks = links.filter((link) => groupFiles.includes(link.a) && groupFiles.includes(link.b));
-    const reasons = uniqueInOrder(groupLinks.flatMap((link) => link.reasons));
-    const confidence = Math.round(groupLinks.reduce((best, link) => Math.max(best, link.confidence), 0));
-    groups.push({
-      files: groupFiles.sort((a, b) => profileSize(a) - profileSize(b) || a.path.localeCompare(b.path)),
-      confidence,
-      reasons,
-      comparisons: groupLinks.sort((a, b) => b.confidence - a.confidence).slice(0, 4),
-    });
-  });
-
-  return groups.sort((a, b) => b.confidence - a.confidence || b.files.length - a.files.length);
+  return links
+    .sort((a, b) => b.confidence - a.confidence || a.a.path.localeCompare(b.a.path) || a.b.path.localeCompare(b.b.path))
+    .map((link) => ({
+      files: [link.a, link.b].sort((a, b) => profileSize(a) - profileSize(b) || a.path.localeCompare(b.path)),
+      confidence: Math.round(link.confidence),
+      type: classifyDxfReviewCandidate(link),
+      reasons: uniqueInOrder(link.reasons),
+      comparisons: [link],
+    }));
 }
 
 function compareDxfReviewCandidate(a, b) {
   const aDimensions = sortedDxfDimensions(a.geometry.bounds);
   const bDimensions = sortedDxfDimensions(b.geometry.bounds);
   const outline = compareDxfOutlineFamily(a, b);
+  const holePattern = compareDxfHolePattern(a, b);
   const widthDelta = relativeDelta(aDimensions.width, bDimensions.width);
   const heightDelta = relativeDelta(aDimensions.height, bDimensions.height);
   const aspectDelta = relativeDelta(aDimensions.aspect, bDimensions.aspect);
   const areaDelta = relativeDelta(aDimensions.area, bDimensions.area);
   const entityDelta = relativeDelta(a.geometry.entityCount, b.geometry.entityCount);
+  const leftProfileArea = closedLineProfileArea(a.geometry.primitives);
+  const rightProfileArea = closedLineProfileArea(b.geometry.primitives);
+  const profileAreaDelta = leftProfileArea !== null && rightProfileArea !== null ? relativeDelta(leftProfileArea, rightProfileArea) : null;
   const reasons = [];
-  let confidence = 42;
+  let confidence = 38;
 
   if (outline.compatible) {
     confidence += outline.score;
     reasons.push(outline.reason);
   } else {
-    confidence -= 28;
+    confidence -= 30;
     reasons.push(outline.reason);
   }
 
@@ -1353,17 +1615,37 @@ function compareDxfReviewCandidate(a, b) {
   }
 
   if (a.features.holeCount === b.features.holeCount) {
-    confidence += 6;
+    confidence += 5;
     reasons.push("same hole count");
+  } else if (Math.abs(a.features.holeCount - b.features.holeCount) <= 1) {
+    confidence += 1;
+    reasons.push("similar hole count");
   } else {
-    confidence -= 6;
+    confidence -= 7;
+  }
+
+  if (holePattern.score >= 88) {
+    confidence += 14;
+    reasons.push(...holePattern.reasons.slice(0, 3));
+  } else if (holePattern.score >= 72) {
+    confidence += 8;
+    reasons.push(...holePattern.reasons.slice(0, 3));
+  } else if (holePattern.score < 45) {
+    confidence -= 8;
+  }
+
+  const provisionalComparison = { a, b, deltas: { widthDelta, heightDelta, aspectDelta, areaDelta, profileAreaDelta }, holePattern, outline };
+  if (hasPossibleExactDxfMiss(provisionalComparison)) {
+    confidence += 22;
+    reasons.push("same overall dimensions and hole pattern");
+    if (profileAreaDelta !== null && profileAreaDelta <= 0.002) reasons.push("matching enclosed profile area");
   }
 
   if (a.geometry.entityCount === b.geometry.entityCount) {
-    confidence += 6;
+    confidence += 5;
     reasons.push("same entity count");
   } else if (entityDelta <= 0.25) {
-    confidence += 3;
+    confidence += 2;
     reasons.push("similar entity count");
   } else {
     confidence -= 8;
@@ -1376,10 +1658,11 @@ function compareDxfReviewCandidate(a, b) {
   return {
     a,
     b,
-    confidence: Math.max(0, Math.min(86, confidence)),
+    confidence: Math.max(0, Math.min(92, confidence)),
     reasons,
-    deltas: { widthDelta, heightDelta, aspectDelta, areaDelta },
+    deltas: { widthDelta, heightDelta, aspectDelta, areaDelta, profileAreaDelta },
     outline,
+    holePattern,
   };
 }
 
@@ -1410,6 +1693,7 @@ function compareDxfOutlineFamily(a, b) {
 
   return {
     compatible: segmentDelta <= Math.max(2, Math.ceil(Math.max(left.segmentCount || 0, right.segmentCount || 0) * 0.25)),
+    sameEntityMix: lineDelta === 0 && arcDelta === 0,
     score,
     reason: reasons.join(", "),
   };
@@ -1532,10 +1816,52 @@ function formatInches(value) {
   return `${dxfRound(value)} in`;
 }
 
+function hasMatchingDxfDimensions(comparison, tolerance = 0.002) {
+  const { widthDelta, heightDelta, aspectDelta } = comparison.deltas;
+  return widthDelta <= tolerance && heightDelta <= tolerance && aspectDelta <= tolerance;
+}
+
+function hasMatchingDxfHolePattern(comparison) {
+  const leftCount = comparison.a.features.holeCount;
+  const rightCount = comparison.b.features.holeCount;
+  if (leftCount !== rightCount) return false;
+  if (!leftCount && !rightCount) return true;
+  return (
+    (comparison.holePattern?.maxDiameterDelta || 0) <= 0.005 &&
+    (comparison.holePattern?.maxCenterDelta || 0) <= 0.01 &&
+    (comparison.holePattern?.maxSpacingDelta || 0) <= 0.01
+  );
+}
+
+function hasPossibleExactDxfMiss(comparison) {
+  const matchingLineProfileArea = comparison.deltas.profileAreaDelta !== null && comparison.deltas.profileAreaDelta <= 0.002;
+  const matchingOutline = comparison.outline.compatible && comparison.outline.sameEntityMix;
+  return hasMatchingDxfDimensions(comparison) && hasMatchingDxfHolePattern(comparison) && (matchingLineProfileArea || matchingOutline);
+}
+
 function hasDxfReviewCue(comparison) {
   const { widthDelta, heightDelta, aspectDelta } = comparison.deltas;
-  const closeDimension = widthDelta <= 0.18 || heightDelta <= 0.18;
-  return comparison.outline.compatible && closeDimension && aspectDelta <= 0.16;
+  const strongDimensions = widthDelta <= 0.08 && heightDelta <= 0.08 && aspectDelta <= 0.08;
+  const relatedDimensions = widthDelta <= 0.12 && heightDelta <= 0.18 && aspectDelta <= 0.12;
+  const strongHolePattern = comparison.holePattern?.score >= 82;
+  const partialHolePattern = comparison.holePattern?.score >= 68 && Math.min(comparison.a.features.holeCount, comparison.b.features.holeCount) >= 2;
+
+  if (hasPossibleExactDxfMiss(comparison)) return true;
+  if (!comparison.outline.compatible || !comparison.outline.sameEntityMix) return false;
+  return strongDimensions || (relatedDimensions && strongHolePattern) || (strongDimensions && partialHolePattern);
+}
+
+function classifyDxfReviewCandidate(comparison) {
+  const { widthDelta, heightDelta, aspectDelta } = comparison.deltas;
+  const dimensionsDiffer = Math.max(widthDelta, heightDelta) > 0.015 || aspectDelta > 0.015;
+  const holeScore = comparison.holePattern?.score || 0;
+  const holesDiffer = !hasMatchingDxfHolePattern(comparison);
+
+  if (hasPossibleExactDxfMiss(comparison)) return "Possible exact profile match";
+  if (dimensionsDiffer && holesDiffer && holeScore >= 68) return "Profile dimension + hole pattern variant";
+  if (dimensionsDiffer) return "Profile dimension variant";
+  if (holeScore >= 68 && holesDiffer) return "Partial hole pattern variant";
+  return "Profile dimension variant";
 }
 
 function findDxfUniqueFiles(files, exactGroups, nearMatches, holeVariants, reviewCandidates = []) {
@@ -1570,8 +1896,9 @@ function findDxfClosestFiles(target, files, limit = 5) {
 
 function compareDxfSimilarity(a, b) {
   const holePattern = compareDxfHolePattern(a, b);
-  if (a.signature === b.signature) {
-    return { file: b, score: 100, type: "Exact profile", reasons: ["same normalized DXF profile", ...holePattern.differences], holePattern };
+  const exactProfile = areDxfFlatEquivalent(a, b);
+  if (exactProfile) {
+    return { file: b, score: 100, type: "Exact profile", reasons: ["same flat-part geometry across orientation", ...holePattern.differences], holePattern };
   }
 
   if (a.features.outerSignature && a.features.outerSignature === b.features.outerSignature) {
@@ -1591,7 +1918,7 @@ function compareDxfSimilarity(a, b) {
   return {
     file: b,
     score,
-    type: hasDxfReviewCue(review) ? "Review candidate" : "Low similarity",
+    type: hasDxfReviewCue(review) ? classifyDxfReviewCandidate(review) : "Low similarity",
     reasons: [...(review.reasons.length ? review.reasons : ["nearest available dimensional comparison"]), ...holePattern.differences],
     holePattern,
   };
@@ -1694,17 +2021,21 @@ function renderDxfResults(isLoading) {
   renderDxfLookup();
   summary.innerHTML = [
     ["DXFs", dxfState.files.length],
-    ["Unique Parts", dxfState.uniqueFiles.length],
+    ["No Match Found", dxfState.uniqueFiles.length],
     ["Exact Matches", matchGroups],
     ["Near Matches", dxfState.nearMatches.length],
     ["Hole Variants", dxfState.holeVariants.length],
-    ["Review", dxfState.reviewCandidates.length],
+    ["Suggested Variants", dxfState.reviewCandidates.length],
   ]
     .map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`)
     .join("");
 
   if (isLoading) {
-    results.innerHTML = `<div class="empty">Reading DXFs...</div>`;
+    const progress = dxfState.loadingProgress;
+    const progressText = progress
+      ? `${progress.label}: ${progress.done} / ${progress.total}`
+      : "Reading DXFs...";
+    results.innerHTML = `<div class="empty">${escapeHtml(progressText)}</div>`;
     return;
   }
   if (!dxfState.files.length) {
@@ -1713,58 +2044,91 @@ function renderDxfResults(isLoading) {
     return;
   }
 
-  const nearMatchHtml = dxfState.nearMatches.length
+  const skippedRevisionHtml = dxfState.skippedRevisions.length
     ? `
       <section class="dxf-section-block">
-        <div class="section-heading compact">
-          <h2>Near Profile Matches</h2>
-          <p>Same normalized profile shape at different sizes, such as 2 x 2 and 2.25 x 2.25 gussets.</p>
+        <div class="dxf-revision-note">
+          <strong>${dxfState.skippedRevisions.length} older revision${dxfState.skippedRevisions.length === 1 ? "" : "s"} skipped.</strong>
+          <span>When files share the same 9-digit part number, only the furthest letter revision is compared.</span>
         </div>
-        ${dxfState.nearMatches.map(dxfNearMatchHtml).join("")}
       </section>
     `
     : "";
-  const holeVariantHtml = dxfState.holeVariants.length
-    ? `
-      <section class="dxf-section-block">
-        <div class="section-heading compact">
-          <h2>Hole Variants</h2>
-          <p>Same outer profile with changed hole size, location, count, or pattern.</p>
-        </div>
-        ${dxfState.holeVariants.map(dxfHoleVariantHtml).join("")}
-      </section>
-    `
-    : "";
-  const exactHtml = `
-    <section class="dxf-section-block">
-      <div class="section-heading compact">
-        <h2>Exact Profile Groups</h2>
-        <p>Same normalized DXF profile signature.</p>
+  results.innerHTML = skippedRevisionHtml + dxfResultTabsHtml();
+}
+
+function dxfResultTabsHtml() {
+  const exactGroups = dxfState.groups.filter((group) => group.files.length > 1);
+  const tabs = [
+    {
+      id: "exact",
+      label: "Exact Matches",
+      count: exactGroups.length,
+      title: "Exact Profile Groups",
+      description: "Same flat-part geometry after origin, rotation, and mirror normalization.",
+      content: exactGroups.map(dxfGroupHtml).join("") || '<div class="empty">No exact profile matches found.</div>',
+    },
+    {
+      id: "recommendations",
+      label: "Recommendations",
+      count: dxfState.reviewCandidates.length,
+      title: "Suggested Variants",
+      description: "Higher-quality recommendations triggered by close overall dimensions, strong hole-pattern evidence, or both.",
+      content: dxfState.reviewCandidates.map(dxfReviewCandidateHtml).join("") || '<div class="empty">No suggested variants found.</div>',
+    },
+    {
+      id: "hole",
+      label: "Hole Variants",
+      count: dxfState.holeVariants.length,
+      title: "Hole Variants",
+      description: "Same outer profile with changed hole size, location, count, or pattern.",
+      content: dxfState.holeVariants.map(dxfHoleVariantHtml).join("") || '<div class="empty">No hole variants found.</div>',
+    },
+    {
+      id: "near",
+      label: "Near Matches",
+      count: dxfState.nearMatches.length,
+      title: "Near Profile Matches",
+      description: "Same normalized profile shape at different sizes, such as 2 x 2 and 2.25 x 2.25 gussets.",
+      content: dxfState.nearMatches.map(dxfNearMatchHtml).join("") || '<div class="empty">No near profile matches found.</div>',
+    },
+    {
+      id: "unique",
+      label: "No Match Found",
+      count: dxfState.uniqueFiles.length,
+      title: "No Match Found",
+      description: "Files that did not meet the exact, near-profile, hole-variant, or suggested-variant criteria.",
+      content: dxfUniqueFilesHtml(dxfState.uniqueFiles),
+    },
+  ];
+  if (!tabs.some((tab) => tab.id === dxfState.activeResultTab)) dxfState.activeResultTab = "exact";
+  const active = tabs.find((tab) => tab.id === dxfState.activeResultTab) || tabs[0];
+
+  return `
+    <section class="dxf-result-tabs" aria-label="DXF result categories">
+      <div class="dxf-subtabs" role="tablist" aria-label="DXF result categories">
+        ${tabs.map((tab) => `
+          <button
+            class="dxf-subtab ${tab.id === active.id ? "is-active" : ""}"
+            type="button"
+            role="tab"
+            aria-selected="${tab.id === active.id ? "true" : "false"}"
+            data-dxf-result-tab="${tab.id}"
+          >
+            <span>${escapeHtml(tab.label)}</span>
+            <b>${tab.count}</b>
+          </button>
+        `).join("")}
       </div>
-      ${dxfState.groups.filter((group) => group.files.length > 1).map(dxfGroupHtml).join("") || '<div class="empty">No exact profile matches found.</div>'}
+      <section class="dxf-section-block dxf-result-panel" role="tabpanel">
+        <div class="section-heading compact">
+          <h2>${escapeHtml(active.title)}</h2>
+          <p>${escapeHtml(active.description)}</p>
+        </div>
+        ${active.content}
+      </section>
     </section>
   `;
-  const reviewCandidateHtml = dxfState.reviewCandidates.length
-    ? `
-      <section class="dxf-section-block">
-        <div class="section-heading compact">
-          <h2>Similar Unique Parts</h2>
-          <p>Unique files with compatible outline families plus close dimensions, hole count, or entity count. Review only; these are not treated as matches.</p>
-        </div>
-        ${dxfState.reviewCandidates.map(dxfReviewCandidateHtml).join("")}
-      </section>
-    `
-    : "";
-  const uniqueHtml = `
-    <section class="dxf-section-block">
-      <div class="section-heading compact">
-        <h2>Unique Parts</h2>
-        <p>Files with no exact, near-profile, or hole-variant match in the loaded set.</p>
-      </div>
-      ${dxfUniqueFilesHtml(dxfState.uniqueFiles)}
-    </section>
-  `;
-  results.innerHTML = holeVariantHtml + nearMatchHtml + exactHtml + reviewCandidateHtml + uniqueHtml;
 }
 
 function renderDxfLookup() {
@@ -1925,12 +2289,12 @@ function dxfReviewCandidateHtml(group, index) {
       <div>
         <div class="dxf-group-head">
           <div>
-            <p class="cluster-type">Similar unique parts</p>
-            <h3>Review Candidate ${index + 1}</h3>
+            <p class="cluster-type">${escapeHtml(group.type || "Suggested variant")}</p>
+            <h3>Recommendation ${index + 1}</h3>
           </div>
           <span class="confidence warn">${group.confidence}% confidence</span>
         </div>
-        <p class="cluster-reason">${escapeHtml(group.reasons.slice(0, 4).join(", "))}. These files remain unique, but share enough outline and dimension signals to inspect.</p>
+        <p class="cluster-reason">${escapeHtml(group.reasons.slice(0, 5).join(", "))}. This pair has enough dimensional, hole-pattern, or signature-mismatch evidence for a second look.</p>
         <dl class="metrics">
           <div><dt>Files</dt><dd>${files.length}</dd></div>
           <div><dt>Smallest</dt><dd>${dxfSizeKey(files[0].geometry.bounds)}</dd></div>
@@ -1963,7 +2327,7 @@ function dxfClosestMatchesHtml(target, matches) {
         `;
       })
       .join("")
-    : '<li><div><strong>No qualifying matches found.</strong><span>This part does not meet the same exact, near, hole-variant, or compatible-outline review criteria with any loaded DXF.</span></div></li>';
+    : '<li><div><strong>No match found.</strong><span>This part does not meet exact, near-profile, hole-variant, or suggested-variant criteria with any loaded DXF.</span></div></li>';
 
   return `
     <article class="dxf-lookup-card">
@@ -1988,7 +2352,7 @@ function dxfClosestMatchReasons(match) {
 }
 
 function dxfUniqueFilesHtml(files) {
-  if (!files.length) return '<div class="empty">No unique parts found.</div>';
+  if (!files.length) return '<div class="empty">Every loaded part has at least one match or suggested variant.</div>';
   const fileList = files
     .map((file) => {
       const bounds = file.geometry.bounds;
@@ -2117,6 +2481,13 @@ document.querySelector("#loadSampleDxfSet").addEventListener("click", () => {
 document.querySelector("#dxfLookupInput").addEventListener("input", (event) => {
   dxfState.lookupQuery = event.target.value;
   renderDxfLookup();
+});
+
+document.querySelector("#dxfResults").addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-dxf-result-tab]");
+  if (!tab) return;
+  dxfState.activeResultTab = tab.dataset.dxfResultTab;
+  renderDxfResults(false);
 });
 
 const dxfDropZone = document.querySelector("#dxfDropZone");

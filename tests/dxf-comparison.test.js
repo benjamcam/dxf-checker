@@ -152,6 +152,19 @@ function rectangle(width, height) {
   ]));
 }
 
+function segmentedRectangle(width, height) {
+  return dxf(lwPolyline([
+    [0, 0],
+    [width / 2, 0],
+    [width, 0],
+    [width, height / 2],
+    [width, height],
+    [width / 2, height],
+    [0, height],
+    [0, height / 2],
+  ]));
+}
+
 function roundedRectangle(width, height, radius, offsetX = 0, offsetY = 0) {
   const left = offsetX;
   const right = offsetX + width;
@@ -239,9 +252,29 @@ function makeFile(name, text) {
     size: text.length,
     geometry,
     signature: buildDxfSignature(geometry.primitives),
+    flatSignature: buildDxfFlatSignature(geometry.primitives),
     scaleSignature: buildDxfScaleSignature(geometry.primitives),
     features: buildDxfFeatureSignatures(geometry.primitives),
   };
+}
+
+function makeFileFromPath(path) {
+  const text = fs.readFileSync(path, "utf8");
+  const geometry = parseDxf(text);
+  return {
+    name: path.split("/").pop(),
+    path,
+    size: text.length,
+    geometry,
+    signature: buildDxfSignature(geometry.primitives),
+    flatSignature: buildDxfFlatSignature(geometry.primitives),
+    scaleSignature: buildDxfScaleSignature(geometry.primitives),
+    features: buildDxfFeatureSignatures(geometry.primitives),
+  };
+}
+
+function fakeDxfFile(name) {
+  return { name, webkitRelativePath: name };
 }
 
 function assert(condition, message) {
@@ -249,6 +282,26 @@ function assert(condition, message) {
 }
 
 const tests = [
+  {
+    name: "latest 9-digit part revision is selected before DXF comparison",
+    run() {
+      const { files, skipped } = filterLatestDxfRevisions([
+        fakeDxfFile("123456789.DXF"),
+        fakeDxfFile("123456789B.DXF"),
+        fakeDxfFile("123456789C.DXF"),
+        fakeDxfFile("987654321C.DXF"),
+        fakeDxfFile("987654321D.DXF"),
+        fakeDxfFile("misc-profile.DXF"),
+      ]);
+      const names = files.map((file) => file.name);
+      assert(names.includes("123456789C.DXF"), "expected C revision to be kept");
+      assert(names.includes("987654321D.DXF"), "expected D revision to be kept");
+      assert(names.includes("misc-profile.DXF"), "expected non-PN file to pass through");
+      assert(!names.includes("123456789.DXF") && !names.includes("123456789B.DXF"), "older revisions were not filtered");
+      assert(!names.includes("987654321C.DXF"), "C revision was not filtered when D exists");
+      assert(skipped.length === 3, `expected 3 skipped revisions, found ${skipped.length}`);
+    },
+  },
   {
     name: "same part matches across origin shifts",
     run() {
@@ -287,6 +340,19 @@ const tests = [
         [0, 2],
       ]));
       assert(signature(rightTriangle(2)) === signature(mirrored), "mirrored triangle did not exact-match");
+    },
+  },
+  {
+    name: "flat equivalent check groups mirrored rounded profiles",
+    run() {
+      const base = makeFile("rounded base", roundedRectangleWithHole(4, 2, 0.25, 1, 1, 0.25));
+      const mirroredShifted = makeFile("rounded mirrored", roundedRectangleWithHole(4, 2, 0.25, 3, 1, 0.25));
+      mirroredShifted.geometry.primitives = mirroredShifted.geometry.primitives.map((primitive) => transformPrimitive(primitive, 180, true));
+      mirroredShifted.signature = buildDxfSignature(mirroredShifted.geometry.primitives);
+      mirroredShifted.flatSignature = buildDxfFlatSignature(mirroredShifted.geometry.primitives);
+      assert(areDxfFlatEquivalent(base, mirroredShifted), "flat-equivalent check did not match noisy mirrored profile");
+      const groups = groupDxfFiles([base, mirroredShifted]);
+      assert(groups.length === 1 && groups[0].files.length === 2, "flat-equivalent files were not grouped as exact");
     },
   },
   {
@@ -329,6 +395,19 @@ const tests = [
       const variants = findDxfHoleVariants(files);
       assert(variants.length === 1, `expected 1 hole variant group, found ${variants.length}`);
       assert(variants[0].type === "Hole location variant", `expected hole location variant, found ${variants[0].type}`);
+    },
+  },
+  {
+    name: "local sample pair is grouped before hole-variant review when present",
+    run() {
+      const leftPath = "DXF Test Folder 2/100200037A.dxf";
+      const rightPath = "DXF Test Folder 2/100200038A.dxf";
+      if (!fs.existsSync(leftPath) || !fs.existsSync(rightPath)) return;
+      const files = [makeFileFromPath(leftPath), makeFileFromPath(rightPath)];
+      const groups = groupDxfFiles(files);
+      const variants = findDxfHoleVariants(files);
+      assert(groups.length === 1 && groups[0].files.length === 2, "sample pair was not grouped as flat-equivalent exact geometry");
+      assert(variants.length === 0, "sample pair was incorrectly surfaced as a hole variant");
     },
   },
   {
@@ -417,6 +496,7 @@ const tests = [
           size: file.size,
           geometry,
           signature: buildDxfSignature(geometry.primitives),
+          flatSignature: buildDxfFlatSignature(geometry.primitives),
           scaleSignature: buildDxfScaleSignature(geometry.primitives),
           features: buildDxfFeatureSignatures(geometry.primitives),
         };
@@ -475,7 +555,24 @@ const tests = [
     },
   },
   {
-    name: "unique dimensional variants are surfaced as review candidates",
+    name: "same-size same-hole segmented outlines are promoted to exact matches",
+    run() {
+      const files = [
+        makeFile("4x2 rectangle", rectangle(4, 2)),
+        makeFile("4x2 segmented rectangle", segmentedRectangle(4, 2)),
+        makeFile("unrelated narrow plate", rectangle(1, 8)),
+      ];
+      const exact = groupDxfFiles(files);
+      const near = findDxfNearMatches(files);
+      const holes = findDxfHoleVariants(files);
+      const variants = findDxfReviewCandidates(files, exact, near, holes);
+      const exactGroup = exact.find((group) => group.files.length === 2);
+      assert(Boolean(exactGroup), "segmented equivalent was not promoted to exact match");
+      assert(variants.length === 0, `expected no recommendation after exact grouping, found ${variants.length}`);
+    },
+  },
+  {
+    name: "dimension variants are surfaced as suggested variants",
     run() {
       const files = [
         makeFile("6x12 plate", rectangle(6, 12)),
@@ -487,13 +584,31 @@ const tests = [
       const holes = findDxfHoleVariants(files);
       const review = findDxfReviewCandidates(files, exact, near, holes);
       const reviewNames = review.flatMap((group) => group.files.map((file) => file.name));
-      assert(review.length === 1, `expected 1 review group, found ${review.length}`);
-      assert(reviewNames.includes("6x12 plate") && reviewNames.includes("6x13 plate"), "similar plates missing from review group");
-      assert(!reviewNames.includes("unrelated long plate"), "unrelated plate incorrectly included in review group");
+      assert(review.length === 1, `expected 1 suggested variant group, found ${review.length}`);
+      assert(reviewNames.includes("6x12 plate") && reviewNames.includes("6x13 plate"), "similar plates missing from suggested variant group");
+      assert(!reviewNames.includes("unrelated long plate"), "unrelated plate incorrectly included in suggested variant group");
     },
   },
   {
-    name: "review candidates require compatible outline families",
+    name: "suggested variants use partial hole pattern evidence",
+    run() {
+      const fiveHolePlate = (width, firstChangedRadius = 0.25, secondChangedRadius = 0.25) => dxf(`${lwPolyline([[0, 0], [width, 0], [width, 4], [0, 4]])}${circle(0.75, 1, 0.25)}${circle(1.5, 1, 0.25)}${circle(2.25, 1, 0.25)}${circle(3, 1, firstChangedRadius)}${circle(3.75, 1, secondChangedRadius)}`);
+      const files = [
+        makeFile("4x4 five-hole plate", fiveHolePlate(4)),
+        makeFile("4.13x4 five-hole plate with two larger holes", fiveHolePlate(4.125, 0.28125, 0.28125)),
+        makeFile("unrelated narrow plate", rectangle(1, 8)),
+      ];
+      const exact = groupDxfFiles(files);
+      const near = findDxfNearMatches(files);
+      const holes = findDxfHoleVariants(files);
+      const variants = findDxfReviewCandidates(files, exact, near, holes);
+      assert(variants.length === 1, `expected 1 suggested variant, found ${variants.length}`);
+      assert(variants[0].type === "Profile dimension + hole pattern variant", `expected combined variant type, found ${variants[0].type}`);
+      assert(variants[0].comparisons[0].holePattern.differences.join(" ").includes("diameter"), "partial hole-size evidence was not included");
+    },
+  },
+  {
+    name: "suggested variants require compatible outline families",
     run() {
       const files = [
         makeFile("2in disk", disk(2)),
@@ -504,7 +619,23 @@ const tests = [
       const near = findDxfNearMatches(files);
       const holes = findDxfHoleVariants(files);
       const review = findDxfReviewCandidates(files, exact, near, holes);
-      assert(review.length === 0, `expected no cross-family review candidates, found ${review.length}`);
+      assert(review.length === 0, `expected no cross-family suggested variants, found ${review.length}`);
+    },
+  },
+  {
+    name: "suggested variants do not chain into indirect groups",
+    run() {
+      const files = [
+        makeFile("6x10 plate", rectangle(6, 10)),
+        makeFile("6x10.7 plate", rectangle(6, 10.7)),
+        makeFile("6x11.45 plate", rectangle(6, 11.45)),
+      ];
+      const exact = groupDxfFiles(files);
+      const near = findDxfNearMatches(files);
+      const holes = findDxfHoleVariants(files);
+      const review = findDxfReviewCandidates(files, exact, near, holes);
+      assert(review.length >= 1, "expected direct suggested variant pairs");
+      assert(review.every((group) => group.files.length === 2), "suggested variants were incorrectly merged into multi-file chain groups");
     },
   },
   {
@@ -516,7 +647,7 @@ const tests = [
     },
   },
   {
-    name: "review candidates are not listed as unique parts",
+    name: "suggested variants are not listed as no-match parts",
     run() {
       const files = [
         makeFile("6x12 plate", rectangle(6, 12)),
@@ -531,7 +662,7 @@ const tests = [
       const uniqueNames = unique.map((file) => file.name);
       assert(unique.length === 1, `expected 1 truly unique file, found ${unique.length}`);
       assert(uniqueNames.includes("unrelated long plate"), "unrelated plate missing from unique list");
-      assert(!uniqueNames.includes("6x12 plate") && !uniqueNames.includes("6x13 plate"), "review candidates incorrectly listed as unique");
+      assert(!uniqueNames.includes("6x12 plate") && !uniqueNames.includes("6x13 plate"), "suggested variants incorrectly listed as no-match");
     },
   },
   {
@@ -548,15 +679,16 @@ const tests = [
       ];
       const target = findDxfFileByQuery(files, "target");
       const closest = findDxfClosestFiles(target, files, 5);
-      assert(closest.length === 4, `expected 4 qualifying files, found ${closest.length}`);
+      assert(closest.length === 3, `expected 3 qualifying files, found ${closest.length}`);
       assert(closest[0].file.name === "exact copy", `expected exact copy first, found ${closest[0].file.name}`);
       assert(closest[0].score === 100, `expected exact copy score 100, found ${closest[0].score}`);
+      assert(!closest.some((match) => match.file.name === "close 6x14 plate"), "dimension-only loose variant was incorrectly included");
       assert(!closest.some((match) => match.file.name === "long narrow plate"), "low-similarity part was incorrectly included");
       assert(closest.every((match, index) => index === 0 || closest[index - 1].score >= match.score), "closest matches were not score-sorted");
     },
   },
   {
-    name: "closest lookup uses same review family criteria",
+    name: "closest lookup uses same suggested-variant family criteria",
     run() {
       const files = [
         makeFile("2in disk", disk(2)),
