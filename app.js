@@ -190,7 +190,7 @@ const dxfState = {
   loadingProgress: null,
 };
 const state = {
-  view: "engineer",
+  view: "dxf",
   query: "",
   family: "",
   material: "",
@@ -403,27 +403,13 @@ function querySynonymHit(query, part) {
 }
 
 function render() {
-  renderStats();
   renderFilters();
   renderParts();
   renderClusters();
 }
 
-function renderStats() {
-  const clusters = buildClusters();
-  const exact = clusters.filter((cluster) => cluster.confidence >= 90).length;
-  const stats = [
-    ["Parts", normalizedParts.length],
-    ["Review Clusters", clusters.length],
-    ["Exact Groups", exact],
-    ["Decisions", decisions.length],
-  ];
-  document.querySelector("#headerStats").innerHTML = stats
-    .map(([label, value]) => `<div class="stat"><strong>${value}</strong><span>${label}</span></div>`)
-    .join("");
-}
-
 function renderFilters() {
+  if (!document.querySelector("#familyFilter")) return;
   setOptions("#familyFilter", unique(normalizedParts.map((part) => part.family)), state.family);
   setOptions("#materialFilter", unique(normalizedParts.map((part) => part.normalizedMaterial)), state.material);
   setOptions("#thicknessFilter", unique(normalizedParts.map((part) => part.thicknessKey)), state.thickness, formatThickness);
@@ -451,6 +437,7 @@ function uniqueInOrder(values) {
 
 function renderParts() {
   const container = document.querySelector("#partResults");
+  if (!container) return;
   const results = filteredParts();
   if (!results.length) {
     container.innerHTML = `<div class="empty">No matching parts found.</div>`;
@@ -478,6 +465,7 @@ function renderParts() {
 
 function renderClusters() {
   const container = document.querySelector("#clusterResults");
+  if (!container) return;
   const clusters = buildClusters();
   if (!clusters.length) {
     container.innerHTML = `<div class="empty">No review clusters found.</div>`;
@@ -497,7 +485,6 @@ function renderClusters() {
     template.querySelectorAll("button").forEach((button) => {
       button.addEventListener("click", () => {
         decisions.push({ action: button.textContent, ids: cluster.parts.map((part) => part.id), at: new Date().toISOString() });
-        renderStats();
       });
     });
     container.appendChild(template);
@@ -531,7 +518,6 @@ function miniPartHtml(part) {
 
 function recordDecision(action, part) {
   decisions.push({ action, id: part.id, at: new Date().toISOString() });
-  renderStats();
 }
 
 function previewSvg(part) {
@@ -2369,7 +2355,7 @@ function dxfPreviewSvg(primitives) {
   const height = Math.max(bounds.maxY - bounds.minY, 0.001);
   const viewBox = `${bounds.minX - width * 0.08} ${bounds.minY - height * 0.08} ${width * 1.16} ${height * 1.16}`;
   const elements = primitives.map(dxfPrimitiveSvg).join("");
-  return `<svg viewBox="${viewBox}" role="img" aria-label="DXF profile preview"><g transform="scale(1,-1) translate(0,${-(bounds.minY + bounds.maxY)})">${elements}</g></svg>`;
+  return `<svg viewBox="${viewBox}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="DXF profile preview"><g transform="scale(1,-1) translate(0,${-(bounds.minY + bounds.maxY)})">${elements}</g></svg>`;
 }
 
 function dxfPrimitiveSvg(primitive) {
@@ -2446,44 +2432,40 @@ function readEntryFiles(entry) {
   });
 }
 
-document.querySelector("#query").addEventListener("input", (event) => {
+document.querySelector("#query")?.addEventListener("input", (event) => {
   state.query = event.target.value;
   renderParts();
 });
 
-document.querySelector("#familyFilter").addEventListener("change", (event) => {
+document.querySelector("#familyFilter")?.addEventListener("change", (event) => {
   state.family = event.target.value;
   renderParts();
 });
 
-document.querySelector("#materialFilter").addEventListener("change", (event) => {
+document.querySelector("#materialFilter")?.addEventListener("change", (event) => {
   state.material = event.target.value;
   renderParts();
 });
 
-document.querySelector("#thicknessFilter").addEventListener("change", (event) => {
+document.querySelector("#thicknessFilter")?.addEventListener("change", (event) => {
   state.thickness = event.target.value;
   renderParts();
 });
 
-document.querySelector("#chooseDxfFolder").addEventListener("click", () => {
+document.querySelector("#chooseDxfFolder")?.addEventListener("click", () => {
   document.querySelector("#dxfFolderInput").click();
 });
 
-document.querySelector("#dxfFolderInput").addEventListener("change", (event) => {
+document.querySelector("#dxfFolderInput")?.addEventListener("change", (event) => {
   handleDxfFiles(event.target.files);
 });
 
-document.querySelector("#loadSampleDxfSet").addEventListener("click", () => {
-  handleDxfFiles(makeSampleDxfFiles());
-});
-
-document.querySelector("#dxfLookupInput").addEventListener("input", (event) => {
+document.querySelector("#dxfLookupInput")?.addEventListener("input", (event) => {
   dxfState.lookupQuery = event.target.value;
   renderDxfLookup();
 });
 
-document.querySelector("#dxfResults").addEventListener("click", (event) => {
+document.querySelector("#dxfResults")?.addEventListener("click", (event) => {
   const tab = event.target.closest("[data-dxf-result-tab]");
   if (!tab) return;
   dxfState.activeResultTab = tab.dataset.dxfResultTab;
@@ -2491,18 +2473,20 @@ document.querySelector("#dxfResults").addEventListener("click", (event) => {
 });
 
 const dxfDropZone = document.querySelector("#dxfDropZone");
-dxfDropZone.addEventListener("dragover", (event) => {
-  event.preventDefault();
-  dxfDropZone.classList.add("is-dragging");
-});
-dxfDropZone.addEventListener("dragleave", () => {
-  dxfDropZone.classList.remove("is-dragging");
-});
-dxfDropZone.addEventListener("drop", async (event) => {
-  event.preventDefault();
-  dxfDropZone.classList.remove("is-dragging");
-  handleDxfFiles(await filesFromDrop(event));
-});
+if (dxfDropZone) {
+  dxfDropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dxfDropZone.classList.add("is-dragging");
+  });
+  dxfDropZone.addEventListener("dragleave", () => {
+    dxfDropZone.classList.remove("is-dragging");
+  });
+  dxfDropZone.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    dxfDropZone.classList.remove("is-dragging");
+    handleDxfFiles(await filesFromDrop(event));
+  });
+}
 
 window.dxfTools = {
   parseDxf,
@@ -2520,7 +2504,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     state.view = tab.dataset.view;
     document.querySelectorAll(".tab").forEach((candidate) => candidate.classList.toggle("is-active", candidate === tab));
     document.querySelectorAll(".view").forEach((view) => view.classList.remove("is-active"));
-    document.querySelector(`#${state.view}View`).classList.add("is-active");
+    document.querySelector(`#${state.view}View`)?.classList.add("is-active");
   });
 });
 

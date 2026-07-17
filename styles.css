@@ -47,10 +47,6 @@ button.primary {
 }
 
 .app-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: end;
   padding: 28px clamp(18px, 4vw, 48px) 20px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
@@ -75,13 +71,6 @@ h1 {
   margin-bottom: 0;
   font-size: clamp(26px, 4vw, 42px);
   line-height: 1.1;
-}
-
-.header-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: end;
 }
 
 .stat {
@@ -557,8 +546,9 @@ input[type="file"] {
 
 .dxf-group {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 170px minmax(0, 1fr);
   gap: 14px;
+  align-items: start;
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -581,7 +571,8 @@ input[type="file"] {
 }
 
 .dxf-group-preview {
-  min-height: 150px;
+  width: 170px;
+  height: 128px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fbfcfc;
@@ -592,6 +583,8 @@ input[type="file"] {
   width: 100%;
   height: 100%;
   display: block;
+  max-width: 170px;
+  max-height: 128px;
 }
 
 .dxf-group-head {
@@ -657,13 +650,8 @@ input[type="file"] {
 }
 
 @media (max-width: 860px) {
-  .app-header,
   .section-heading {
     display: grid;
-  }
-
-  .header-stats {
-    justify-content: start;
   }
 
   .toolbar {
